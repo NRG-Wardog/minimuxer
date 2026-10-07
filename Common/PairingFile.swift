@@ -100,14 +100,15 @@ public enum PairingFileParser {
             throw PairingError.invalidPlist("The file could not be parsed as a property list (plist).")
         }
 
-        let missingRP = RPPairingFile.missingKeys(in: plist)
-        if missingRP.isEmpty {
-            return .rppairing
-        }
-
+        // Composite records must use Lockdown/CoreDevice, not RemotePairing.
         let missingLockdown = LockdownPairingFile.missingKeys(in: plist)
         if missingLockdown.isEmpty {
             return .lockdown
+        }
+
+        let missingRP = RPPairingFile.missingKeys(in: plist)
+        if missingRP.isEmpty {
+            return .rppairing
         }
 
         throw PairingError.invalidPlist(
