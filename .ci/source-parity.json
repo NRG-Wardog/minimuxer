@@ -1,0 +1,125 @@
+{
+  "owner": "minimuxer",
+  "upstream_base": "98c3c79982f813878e922ab42f9545314a700f0c",
+  "fork_commit": "eefd74adbda3462fbd5db9857c5f233db8601860",
+  "branch": "migration/runtime-source-141776ba",
+  "behavior_differences": [],
+  "files": [
+    {
+      "path": "Common/PairingFile.swift",
+      "upstream_sha256": "981e421a46f3991ac4472edba1ace965763da6804be29f9d3697a25346fbad8e",
+      "old_generated_sha256": "0f82090b2f0306264dd1a01bd6eb8dc79a4080015ec188227ab27d6c83de9bea",
+      "new_source_sha256": "0f82090b2f0306264dd1a01bd6eb8dc79a4080015ec188227ab27d6c83de9bea",
+      "mode": "0o644",
+      "subsystem": "Maintain Lockdown first composite pairing",
+      "commit": "99afb1fd9dc94862a4b98aabaee05d9b93382dfe",
+      "git_mode": "100644"
+    },
+    {
+      "path": "DeviceGateway/BaseDeviceGateway.swift",
+      "upstream_sha256": "fbd99d75b4241352ce67144381cb3e4095ebaea55e517dad3d24570008a5a241",
+      "old_generated_sha256": "31f763a008ee1715437c238b4126da7669e0ecfdc757fca6f1250234021420eb",
+      "new_source_sha256": "31f763a008ee1715437c238b4126da7669e0ecfdc757fca6f1250234021420eb",
+      "mode": "0o644",
+      "subsystem": "Maintain operation scoped CoreDevice transport and gateway readiness",
+      "commit": "9a5ff8405049e0308f4ad4446c4540c91d85f591",
+      "git_mode": "100644"
+    },
+    {
+      "path": "DeviceGateway/DeviceGatewayAPI.swift",
+      "upstream_sha256": "f1910508b32e5dcac2547f3a4cd858a94f659913de185706f800fe0f02b0d3e0",
+      "old_generated_sha256": "4c4f6dffb21f4cd2de1372a49e939ad04761ed445a85906e3add7b69abc19645",
+      "new_source_sha256": "4c4f6dffb21f4cd2de1372a49e939ad04761ed445a85906e3add7b69abc19645",
+      "mode": "0o644",
+      "subsystem": "Maintain operation scoped CoreDevice transport and gateway readiness",
+      "commit": "9a5ff8405049e0308f4ad4446c4540c91d85f591",
+      "git_mode": "100644"
+    },
+    {
+      "path": "DeviceGateway/idevice/IdeviceGateway.swift",
+      "upstream_sha256": "043816f4249edb315cada4e056285a633ed4eabf46b14733a1a62dc378dbfda6",
+      "old_generated_sha256": "416ff9a0ec1e32382c2e55eaebba7956188d1e90a01a43f5cdb53a3348de4ead",
+      "new_source_sha256": "416ff9a0ec1e32382c2e55eaebba7956188d1e90a01a43f5cdb53a3348de4ead",
+      "mode": "0o644",
+      "subsystem": "Maintain operation scoped CoreDevice transport and gateway readiness",
+      "commit": "9a5ff8405049e0308f4ad4446c4540c91d85f591",
+      "git_mode": "100644"
+    },
+    {
+      "path": "Sources/MinimuxerApi.swift",
+      "upstream_sha256": "5509f75dd03e59926828782a7a863ee9f2f6407add80c237b22a7e96dc211d11",
+      "old_generated_sha256": "be369cf30192086e0926fa40666ef1e99d22aeaf5c35dee8f8e327365f45fc9c",
+      "new_source_sha256": "be369cf30192086e0926fa40666ef1e99d22aeaf5c35dee8f8e327365f45fc9c",
+      "mode": "0o644",
+      "subsystem": "Maintain operation scoped CoreDevice transport and gateway readiness",
+      "commit": "9a5ff8405049e0308f4ad4446c4540c91d85f591",
+      "git_mode": "100644"
+    },
+    {
+      "path": "Sources/MinimuxerImpl.swift",
+      "upstream_sha256": "d232742205f5261e5763e66527103c6437fc38c214b561a366fd542bfccc4036",
+      "old_generated_sha256": "530f091ef950a611eaf9eebe86e86aef04ee9df98152fe20610c3534ebce678e",
+      "new_source_sha256": "530f091ef950a611eaf9eebe86e86aef04ee9df98152fe20610c3534ebce678e",
+      "mode": "0o644",
+      "subsystem": "Maintain operation scoped CoreDevice transport and gateway readiness",
+      "commit": "9a5ff8405049e0308f4ad4446c4540c91d85f591",
+      "git_mode": "100644"
+    },
+    {
+      "path": "Sources/RefreshTransportPolicy.swift",
+      "upstream_sha256": null,
+      "old_generated_sha256": "1ddc3d112d8a218db2c8017947595782fbe625dcdf7fef1fc6d4495f8b8b15d0",
+      "new_source_sha256": "1ddc3d112d8a218db2c8017947595782fbe625dcdf7fef1fc6d4495f8b8b15d0",
+      "mode": "0o644",
+      "subsystem": "Maintain operation scoped CoreDevice transport and gateway readiness",
+      "commit": "9a5ff8405049e0308f4ad4446c4540c91d85f591",
+      "git_mode": "100644"
+    },
+    {
+      "path": "Sources/Services/HeartbeatService.swift",
+      "upstream_sha256": "0fd6951869c7a7470cc915eb7698a4544d2316296ff2efcf6b2224cc12283149",
+      "old_generated_sha256": "cffed2b09e8f09e428f511c51204b8b1f2335e0669efa314a9fade8f3c06c48f",
+      "new_source_sha256": "cffed2b09e8f09e428f511c51204b8b1f2335e0669efa314a9fade8f3c06c48f",
+      "mode": "0o644",
+      "subsystem": "Maintain operation scoped CoreDevice transport and gateway readiness",
+      "commit": "9a5ff8405049e0308f4ad4446c4540c91d85f591",
+      "git_mode": "100644"
+    },
+    {
+      "path": "Sources/Services/NetworkObserverService.swift",
+      "upstream_sha256": "9ea0adb9227664cb24e9c6e76b203eb66dc9275271e4b3d46946bd72956fdd11",
+      "old_generated_sha256": "0a2af148e244000577fb2a252cf4ae311a631e19f77ef9d4fbe83b34dce21f9e",
+      "new_source_sha256": "0a2af148e244000577fb2a252cf4ae311a631e19f77ef9d4fbe83b34dce21f9e",
+      "mode": "0o644",
+      "subsystem": "Maintain operation scoped CoreDevice transport and gateway readiness",
+      "commit": "9a5ff8405049e0308f4ad4446c4540c91d85f591",
+      "git_mode": "100644"
+    },
+    {
+      "path": "DeviceGateway/Package.swift",
+      "upstream_sha256": "5a1224f1b7458b513ee5ae97bee08f4b102a06f195ab83e4cad6c417c08ff02f",
+      "old_generated_sha256": "ecb4a9cbd63f68b1b4dd321c300c28148e996c91b149857d558f2d2a02b0e0ed",
+      "new_source_sha256": "ecb4a9cbd63f68b1b4dd321c300c28148e996c91b149857d558f2d2a02b0e0ed",
+      "mode": "0o644",
+      "subsystem": "Maintain local built idevice package wiring",
+      "commit": "0405d93aa05979e32037be6be87e13ac229ce5e8",
+      "git_mode": "100644"
+    }
+  ],
+  "prepared_evidence_excluded": [
+    ".combined-errors.sha256"
+  ],
+  "tests_run": [
+    "git diff --check",
+    "exact changed source byte and mode comparison"
+  ],
+  "tests_not_run": [
+    "Swift/Xcode build"
+  ],
+  "source_parity_status": "exact_prepared_bytes_pass",
+  "metadata_files": [
+    "NOTICE-NRG-Wardog",
+    ".ci/source-parity.py",
+    ".ci/source-parity.json"
+  ]
+}
