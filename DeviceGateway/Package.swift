@@ -38,11 +38,10 @@ let package = Package(
 //        .package(path: "../../../../local/RemotePairingKit")
     ],
     targets: [
-         .binaryTarget(
-             name: "IDevice",
-             url: "https://github.com/SideStore/idevice/releases/download/v0.1.66-ss-61c2704/idevice-xcframework-v0.1.66-ss-61c2704.zip#DeviceGateway",
-             checksum: "6f32b32ca43d3f28c145742da926cc279d312abd99abe55c79f875e2d6d5e162"
-         ),
+        .binaryTarget(
+            name: "IDevice",
+            path: "LocalBinary/IDevice.xcframework"
+        ),
 //        .binaryTarget(
 //            name: "IDevice",
 //            path: "../../../../local/idevice/swift/IDevice.xcframework"
