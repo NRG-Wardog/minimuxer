@@ -118,12 +118,12 @@ final internal class NetworkObserverService: NetworkObserverAPI, @unchecked Send
                     """)
 
                     let overrideIp = await manager.overridePeerIp
-                    let isOverridden = !(overrideIp ?? "").isEmpty
-
-                    let effectiveIp = await isOverridden
-                            ? (manager.isOverridePeerIpReachable ? overrideIp : nil)            // when override active, we don't question user intent
-                            : (manager.isDerivedPeerIpReachable ? manager.derivedPeerIp : nil)  // only if not overriden, we try to use auto discovered
-                    let effectivePeer = isOverridden ? "overridePeer" : "derivedPeerIp"
+                    let overrideReachable = await manager.isOverridePeerIpReachable
+                    let derivedIp = await manager.derivedPeerIp
+                    let derivedReachable = await manager.isDerivedPeerIpReachable
+                    let effectiveIp = overrideReachable ? overrideIp : (derivedReachable ? derivedIp : nil)
+                    let effectivePeer = overrideReachable ? "overridePeer" : "derivedPeerIp"
+                    debugLog("[SIDESTORE_COREDEVICE] ENDPOINT_SELECT selected_source=\(effectivePeer) reachable=\(effectiveIp != nil)")
 
                     if let peer = effectiveIp {
                         verboseLog("[minimuxer] [net] update device IP with effective tunnel peer: '\(effectivePeer)'")

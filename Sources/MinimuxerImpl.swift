@@ -113,6 +113,30 @@ final internal class MinimuxerImpl: MinimuxerAPI {
         return true
     }
 
+
+    @discardableResult
+    private func configureRefreshTransport() async -> RefreshTransportDecision {
+        let modernOS: Bool
+        if #available(iOS 26.4, *) { modernOS = true } else { modernOS = false }
+        let mode = await getConnectionMode()
+        let utun = network.isUTunAvailable
+        let ipsec = network.isIKEv2IPSecAvailable
+        let decision = RefreshTransportPolicy.select(
+            modernOS: modernOS, mode: mode, pairing: gateway.pairingFileType,
+            utun: utun, ipsec: ipsec, coreDeviceSupported: gateway.supportsCoreDeviceTransport)
+        gateway.configureCoreDeviceTransport(decision.transport == .coreDevice)
+        // Interface presence cannot establish the identity of the App Store VPN.
+        debugLog("[SIDESTORE_COREDEVICE] TRANSPORT_SELECTION os_version=\(ProcessInfo.processInfo.operatingSystemVersionString) pairing_mode=\(gateway.pairingFileType) localdevvpn_detected=unverified utun_detected=\(utun) ipsec_interface_detected=\(ipsec) selected_transport=\(decision.transport.rawValue) reason=\(decision.reason)")
+        return decision
+    }
+
+    func beginTransportBatch() async {
+        await gateway.beginTransportBatch()
+        await configureRefreshTransport()
+    }
+
+    func endTransportBatch() async { await gateway.endTransportBatch() }
+
     func isReady(withNetworkCheck: Bool, withDDIMountCheck: Bool) async -> Result<Bool, MinimuxerError> {
         if !isPairingFileLoaded {
             debugLog("[minimuxer] minimuxer not ready: pairing file not loaded")
@@ -140,27 +164,14 @@ final internal class MinimuxerImpl: MinimuxerAPI {
         let connectionMode = await getConnectionMode()
         let net = self.network
 
-        switch connectionMode {
-            case .notConfigured:
-                return .failure(connectionNotConfiguredError())
-            
-            case .localVPN:
-                let uTunPresent = net.isUTunAvailable
-                if !uTunPresent {
-                    debugLog("[minimuxer] minimuxer not ready: no utun interface found")
-                    return .failure(.noVPN("No utun interface detected — LocalDevVPN is not connected"))
-                }
-
-                // check iKEv2 too if in lockdown mode and ios >= 26.4
-                if self.gateway.pairingFileType != .rppairing && !net.isIKEv2IPSecAvailable {
-                    if #available(iOS 26.4, *) {
-                        debugLog("[minimuxer] minimuxer not ready: no ipsec interface (required for lockdown on iOS 26.4+)")
-                        return .failure(.invalidVPN("utun is present but no ipsec/IKEv2 interface found — LocalDevVPN may not support the lockdown protocol on iOS 26.4+"))
-                    }
-                }
-
-            case .remoteServer:
-                break
+        let decision = await configureRefreshTransport()
+        if decision.transport == .unavailable {
+            return .failure(.invalidVPN(decision.reason))
+        }
+        if decision.transport == .coreDevice {
+            verboseLog("[SIDESTORE_COREDEVICE] LOCALVPN_UTUN_ACCEPTED transport=lockdown-coredevice")
+            // Network-change UI checks must not start CoreDevice/signing work.
+            if !gateway.hasActiveTransportBatch { return .success(false) }
         }
 
         // check if pairing file is loaded
@@ -214,7 +225,7 @@ final internal class MinimuxerImpl: MinimuxerAPI {
 
         verboseLog(
             "minimuxer status (.\(activeProtocol)): " +
-            "deviceUDID=\(deviceUDID ?? "nil") " +
+            "deviceUDID_present=\(deviceUDID != nil) " +
             "started=\(self.proxyServer.isListening) "
         )
         guard deviceUDID != nil else {
@@ -251,8 +262,43 @@ final internal class MinimuxerImpl: MinimuxerAPI {
                err.reason.lowercased().contains("broken pipe") || err.reason.lowercased().contains("brokenpipe") {
                 throw MinimuxerError.noVPN("VPN tunnel connection severed \(context). Cause: \(err.reason)")
             }
+            if context.contains("fetching device UDID") {
+                if err.code == .invalidPairingFile {
+                    throw MinimuxerError.invalidPairing(protocol: self.gateway.pairingFileType, reason: err.reason)
+                }
+                if err.code == .connectionFailed {
+                    if err.reason.lowercased().contains("heartbeat") {
+                        throw MinimuxerError.connect(err.reason)
+                    }
+                    if self.gateway.coreDeviceTransportEnabled || err.reason.contains("CoreDevice") {
+                        throw MinimuxerError.createCoreDevice(err.reason)
+                    }
+                    throw MinimuxerError.noDevice(err.reason)
+                }
+                if err.code == .serviceError {
+                    if err.reason.contains("UniqueDeviceID") {
+                        throw MinimuxerError.getLockdownValue(err.reason)
+                    }
+                    if err.reason.contains("stage=rsd_service") || (err.reason.contains("RSD") && err.reason.contains("service")) {
+                        throw MinimuxerError.noService(err.reason)
+                    }
+                    if err.reason.contains("Lockdown") || err.reason.contains("lockdown") {
+                        throw MinimuxerError.createLockdown(err.reason)
+                    }
+                    throw MinimuxerError.noService(err.reason)
+                }
+                if err.code == .notInitialized {
+                    throw MinimuxerError.notStarted(err.reason)
+                }
+                throw MinimuxerError.noDevice(err.reason)
+            }
             return fallback
+        } catch let err as MinimuxerError {
+            throw err
         } catch {
+            if context.contains("fetching device UDID") {
+                throw MinimuxerError.noDevice(error.localizedDescription)
+            }
             return fallback
         }
     }
@@ -323,6 +369,7 @@ final internal class MinimuxerImpl: MinimuxerAPI {
         try await matchingPriority {
             try await self.gateway.start(pairingFileContent: pairingFile)
         }
+        await configureRefreshTransport()
         // retarget usbmuxd to our fake usbmuxd server (over network)
         retargetUsbmuxdAddr()
         // start our fake usbmuxd server for lockdown protocol based clients if required

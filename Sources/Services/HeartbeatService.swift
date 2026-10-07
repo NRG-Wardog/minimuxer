@@ -52,6 +52,8 @@ final internal class HeartbeatService {
 
     /// Start the heartbeat loop. Safe to call multiple times — ignored if a task is already active.
     func start() async {
+        // CoreDevice owns the operation-scoped heartbeat; never start a probe loop.
+        if gateway.coreDeviceTransportEnabled { return }
         guard await state.tryStart() else {
             return
         }

@@ -65,6 +65,8 @@ public struct ConnectionConfigBinding: Sendable {
 }
 
 public protocol MinimuxerAPI: AnyObject {
+    func beginTransportBatch() async
+    func endTransportBatch() async
     var pairingFileType: PairingProtocol { get }
     var isLoggingEnabled: Bool { get }
     var isPairingFileLoaded: Bool { get }

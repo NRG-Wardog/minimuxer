@@ -66,14 +66,14 @@ open class BaseDeviceGateway: @unchecked Sendable {
         String(describing: type(of: self))
     }
 
-    public func setPort(_ port: UInt16, for protocol: PairingProtocol) {
+    open func setPort(_ port: UInt16, for protocol: PairingProtocol) {
         debugLog("[\(logTag)] setPort(\(port), for: .\(`protocol`)) called")
         guard protocolPorts[`protocol`] != port else { return }
         protocolPorts[`protocol`] = port
         invalidateConnection()
     }
 
-    public func setDeviceEndpointIp(_ ip: String?) {
+    open func setDeviceEndpointIp(_ ip: String?) {
         debugLog("[\(logTag)] setDeviceEndpointIp(\(ip ?? "nil")) called")
         guard deviceEndpointIp != ip else {
             debugLog("[\(logTag)] setDeviceEndpointIp: IP is already \(ip ?? "nil"), skipping invalidation")
