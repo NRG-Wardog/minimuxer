@@ -208,7 +208,9 @@ actor DeviceConnectionManager {
             .compactMap { $0 as? TunnelNetInfo }
             .filter { 
                 $0.tunnelType == .utun && 
-                !$0.interfaceAddresses.v4.isEmpty && $0.interfaceAddresses.v6.isEmpty 
+                // IPv6 can coexist with IPv4 on utun. Keep IPv4 candidates
+                // eligible; resolveCandidatePeers and tcpProbe still gate use.
+                !$0.interfaceAddresses.v4.isEmpty
             }
             .sorted { $0.name < $1.name }
     }

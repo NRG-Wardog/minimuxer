@@ -38,6 +38,28 @@ they are sending traffic-towards(outbound) the local interface (including virtua
 
 final class EMProxyTests: XCTestCase {
 
+    // A dual-stack tunnel must not be excluded before its IPv4 peer can be
+    // discovered and checked. No phone, VPN session or Apple ID is needed.
+    func testDualStackUtunRemainsEligibleForIPv4PeerDiscovery() throws {
+        let v4 = IPv4Info(host: "10.7.1.1",
+                          mask: "255.255.255.255",
+                          hostRaw: 0x0A070101,
+                          maskRaw: 0xFFFFFFFF)
+        let routes = RouteSnapshot.captureRoutes()
+        let dualStack = try TunnelNetInfo(
+            name: "utun99", interfaceIndex: 65500,
+            interfaceAddresses: IPAddresses(v4: [v4], v6: ["fd00::1"]),
+            linkLayerDestinationIP: nil, routes: routes)
+        let ipv6Only = try TunnelNetInfo(
+            name: "utun98", interfaceIndex: 65501,
+            interfaceAddresses: IPAddresses(v4: [], v6: ["fd00::2"]),
+            linkLayerDestinationIP: nil, routes: routes)
+        let interfaces: Set<NetInfo> = [dualStack, ipv6Only]
+        let accepted = DeviceConnectionManager.resolveCandidateTunnels(from: interfaces)
+        XCTAssertEqual(accepted.count, 1)
+        XCTAssertEqual(accepted.first?.name, "utun99")
+    }
+
 
 
     // Test-1: full end to end test passing packets thru real wireguard VPN client
