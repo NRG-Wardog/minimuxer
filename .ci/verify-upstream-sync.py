@@ -19,6 +19,9 @@ def read(path):
 def section(text, start, stop):
     return text[text.index(start):text.index(stop, text.index(start))]
 
+def strip_dependency_imports(text):
+    return re.sub(r'^(?:(?:public|internal) )?import (?:MinimuxerCommon|DeviceGatewayAPI)\n', '', text, flags=re.M)
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--swiftc')
@@ -53,6 +56,12 @@ def main():
     require('let newBackend = params.backend ?? Self.currentBackend' in production_set and 'let newPort = params.remotePairingPort ?? Self.currentRemotePairingPort' in production_set, 'Partial configuration was not resolved before applying')
     require(production_set.count('self.deviceProvider.setConfiguration(gateway: replacement, remotePairingPort: newPort)') == 1 and '.setPort(' not in production_set and '.setGateway(' not in production_set, 'Configuration bypasses atomic provider boundary')
     provider = read('Sources/DeviceProvider.swift')
+    require('internal import MinimuxerCommon\n' in provider, 'Internal helper dependency import must have explicit visibility')
+    require('public import MinimuxerCommon\n' in facade and 'public import DeviceGatewayAPI\n' in facade, 'Public facade dependency visibility changed')
+    for access in ['', 'public ', 'internal ']:
+        for module in ['MinimuxerCommon', 'DeviceGatewayAPI']:
+            require(strip_dependency_imports(access + 'import ' + module + '\n') == '', 'Fake harness retained a real dependency import')
+    require(strip_dependency_imports('import Foundation\n') == 'import Foundation\n', 'Fake harness strips unrelated imports')
     require('newGateway ?? pendingConfiguration?.gateway ?? cachedGateway' in provider, 'Port-only updates ignore pending backend')
     require('guard activeBatches == 0, let pendingConfiguration else { return }' in provider, 'Port can mutate an active lease')
     require(provider.count('.setPort(') == 1 and 'guard activeBatches > endingBatches else { return nil }' in provider, 'Unpaired end or port mutation bypasses lease accounting')
@@ -67,7 +76,7 @@ public protocol MinimuxerFacade: AnyObject, Sendable {}
         paths = ['Common/PairingProtocol.swift', 'Common/ConcurrencyUtils.swift', 'Common/PairingFile.swift', 'Sources/RefreshTransportPolicy.swift', 'Sources/DeviceProvider.swift', '.ci/upstream-sync-smoke.swift']
         prelude += section(facade, 'public struct MinimuxerParams:', 'public protocol MinimuxerFacade:')
         prelude += section(facade, 'public enum GatewayBackend:', 'public final class Minimuxer:')
-        text = prelude + '\n'.join(re.sub(r'^(?:public )?import (?:MinimuxerCommon|DeviceGatewayAPI)\n', '', read(path), flags=re.M) for path in paths)
+        text = prelude + '\n'.join(strip_dependency_imports(read(path)) for path in paths)
         require(text.count('// PRODUCTION_SET_METHOD') == 1, 'Missing exact production set injection point')
         text = text.replace('// PRODUCTION_SET_METHOD', production_set)
         with tempfile.TemporaryDirectory(prefix='minimuxer-source-smoke-') as tmp:

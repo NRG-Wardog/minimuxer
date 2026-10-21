@@ -8,7 +8,7 @@
 
 import Foundation
 import DeviceGatewayAPI
-import MinimuxerCommon
+internal import MinimuxerCommon
 
 final class DeviceProvider: @unchecked Sendable {
     private let lock = NSLock()

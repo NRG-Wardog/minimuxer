@@ -7,14 +7,17 @@
     "source_pin_change_required": true,
     "new_native_upstream": "3e55c8486b2057e40c1f74aaaa1155c82341cf76",
     "jktcp_pin": "32c0210f286b4fd16efe05be4f57167a9d94459b",
-    "candidate_commit_status": "pending_root_owned_two_parent_commit",
+    "candidate_commit_status": "original_reviewed_two_parent_merge_published",
     "required_commit_parents": [
       "efbcab05d7d636aa37c6bf6c7f364d122c5610f6",
       "12be70dc2627307a16bfd2dc7a009080d5bec909"
     ],
     "merge_base": "98c3c79982f813878e922ab42f9545314a700f0c",
     "previous_frozen_manifest_sha256": "86d843d1465ca11c15c8da846a387c3d0b290a194e27524b36b50a476731062c",
-    "verifier_sha256": "6aa1ba176b52552589e648aca7a95c027269ec69d6a0dbe3d0fadac5c229ad98"
+    "verifier_sha256": "6aa1ba176b52552589e648aca7a95c027269ec69d6a0dbe3d0fadac5c229ad98",
+    "commit_role": "historical_reviewed_merge_anchor_not_current_head",
+    "commit": "48419a2d24bd74efcee6dc80552ea89e85dafdee",
+    "tree": "7b920eec7784a282b018637375e877e0ebfcb557"
   },
   "behavior_differences": [
     "Retain NRG Lockdown-first default for composite records while honoring explicit preferred protocol.",
@@ -38,7 +41,7 @@
       "path": ".ci/verify-upstream-sync.py",
       "upstream_sha256": null,
       "previous_fork_sha256": null,
-      "new_source_sha256": "3d3a5b7315eb9f6a99cf24259fd135fa37b7ff6d1d92ce850875648b78bae89c",
+      "new_source_sha256": "6d070a8f6f8750b6a80679831527c83f7e2fb8e747dfb50bad14116a1b939a20",
       "mode": "0o644",
       "git_mode": "100644",
       "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
@@ -101,7 +104,7 @@
       "path": "Sources/DeviceProvider.swift",
       "upstream_sha256": "631b031f6e7e81556e9575def5823bb20ff2b7bff8f1a55828fc6814237ff971",
       "previous_fork_sha256": null,
-      "new_source_sha256": "d2dac82d40c9499ed6ce62b1ffa2048e5d3e7ef0e52e3e1f64e45636d6d384d9",
+      "new_source_sha256": "265a8d55a2f936eaa2bc0d85abac80b4b95dece39e0795d871b39f3652aa7450",
       "mode": "0o644",
       "git_mode": "100644",
       "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
@@ -194,5 +197,21 @@
     "Native backend or device execution",
     "App authentication"
   ],
-  "source_parity_status": "reviewed_sync_manifest_applied_pending_committed_parity_validation"
+  "source_parity_status": "reviewed_sync_manifest_applied_pending_committed_parity_validation",
+  "follow_on": {
+    "candidate_commit_status": "pending_root_owned_single_parent_follow_on",
+    "required_commit_parents": [
+      "48419a2d24bd74efcee6dc80552ea89e85dafdee"
+    ],
+    "merge_anchor": {
+      "commit": "48419a2d24bd74efcee6dc80552ea89e85dafdee",
+      "tree": "7b920eec7784a282b018637375e877e0ebfcb557",
+      "required_commit_parents": [
+        "efbcab05d7d636aa37c6bf6c7f364d122c5610f6",
+        "12be70dc2627307a16bfd2dc7a009080d5bec909"
+      ],
+      "merge_base": "98c3c79982f813878e922ab42f9545314a700f0c"
+    },
+    "scope": "Explicit internal helper import plus source-owned fake checker compatibility; no public API, ownership, compiler-flag or source-verifier changes."
+  }
 }
