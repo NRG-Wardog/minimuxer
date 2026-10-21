@@ -38,8 +38,11 @@ extension String {
     }
 }
 
-public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
+public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI, @unchecked Sendable {
     public static let shared = IdeviceGateway()
+    public var requiresUsbmuxd: Bool {
+        onFFIQueue { pairingFileType == .lockdown && !usesCoreDevice }
+    }
     var lastError: Error? = nil
 
     private func getRustPlistString(_ node: plist_t) -> String? {
@@ -127,13 +130,13 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
         onFFIQueue { super.setDeviceEndpointIp(ip) }
     }
 
-    public override func setPort(_ port: UInt16, for protocol: PairingProtocol) {
-        onFFIQueue { super.setPort(port, for: `protocol`) }
+    public override func setPort(_ port: UInt16, for protocolType: PairingProtocol) {
+        onFFIQueue { super.setPort(port, for: protocolType) }
     }
     private var stagedBundleIdentities: [String: (appName: String, signedIdentifier: String)] = [:]
     private let ffiQueueKey = DispatchSpecificKey<Bool>()
 
-    private override init() {
+    public override init() {
         try! super.init()
         ffiQueue.setSpecific(key: ffiQueueKey, value: true)
     }
@@ -142,15 +145,17 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
         cleanup()
     }
 
-    private func cleanup() {
+    public override func cleanup() {
+        onFFIQueue { self.syncCleanup() }
+    }
+
+    private func syncCleanup() {
         debugLog("[IdeviceGateway] cleanup() called")
         setInitialized(false)
         setPairingFileData(nil)
         stagedBundleIdentities.removeAll()
-
         releaseTransport()
         if let pairingFile = self.pairingFile {
-            verboseLog("[IdeviceGateway] cleanup() freeing pairingFile")
             if pairingFileType == .rppairing {
                 rp_pairing_file_free(pairingFile)
             } else {
@@ -158,9 +163,8 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
             }
             self.pairingFile = nil
         }
-
-        setPairingFileType(.unknown)
         lastError = nil
+        super.cleanup()
     }
 
     private func releaseTransport() {
@@ -196,17 +200,23 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
         onFFIQueue { releaseTransport() }
     }
 
-    public override func setLogging(_ enabled: Bool) {
-        idevice_set_transport_log_callback(sideStoreTransportLog)
-        super.setLogging(enabled)
-        idevice_init_logger(enabled ? IdeviceLogLevel(rawValue: 1) : IdeviceLogLevel(rawValue: 0), IdeviceLogLevel(rawValue: 0), nil)
-        #if DEBUG
-        // just comment/uncomment to override above set logging level during local debugging
-//        idevice_init_logger(IdeviceLogLevel(rawValue: 4), IdeviceLogLevel(rawValue: 0), nil)
-        #endif
+    public override func stop() async throws {
+        try await withFFIDispatch(on: self.ffiQueue) {
+            self.cleanup()
+        }
     }
 
-    private func syncStart(pairingFileContent: String) throws {
+    public override func setLogging(_ enabled: Bool) {
+        idevice_set_transport_log_callback(sideStoreTransportLog)
+        let lowerBoundLevel = IdeviceLogLevel(rawValue: 0)
+        // Preserve the fork's logging ceiling; trace can contain native pairing payloads.
+        let upperBoundLevel = IdeviceLogLevel(rawValue: enabled ? 1 : 0)
+        // set actual logging
+        idevice_init_logger(upperBoundLevel, lowerBoundLevel, nil)
+        super.setLogging(enabled)
+    }
+
+    private func syncStart(pairingFileContent: String, preferred: PairingProtocol?) throws {
         debugLog("[IdeviceGateway] start() called, pairingFileContent length: \(pairingFileContent.count)")
         cleanup()
         
@@ -216,7 +226,7 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
 
         let parsedPairingFile: any PairingFile
         do {
-            parsedPairingFile = try PairingFileParser.parse(content: pairingFileContent)
+            parsedPairingFile = try PairingFileParser.parse(content: pairingFileContent, preferred: preferred)
             setPairingFileData(parsedPairingFile.rawData)
             setPairingFileType(parsedPairingFile.mode)
             debugLog("[SIDESTORE_COREDEVICE] PAIRING_MODE_SELECTED mode=\(parsedPairingFile.mode)")
@@ -413,7 +423,7 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
 
         guard let pairingFile = pairingFile else {
             debugLog("[IdeviceGateway] ensureRPConnection() failed because pairingFile is nil")
-            throw IdeviceGatewayError(.invalidPairingFile, reason: "pairingFile is nil")
+            throw IdeviceGatewayError(.notInitialized, reason: "pairingFile is nil")
         }
 
         guard let deviceEndpointIp = deviceEndpointIp else {
@@ -425,14 +435,15 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
         var err: UnsafeMutablePointer<IdeviceFfiError>? = nil
 
         let rpPort = getPort(for: .rppairing)
-        verboseLog("[IdeviceGateway] ensureRPConnection() calling tunnel_create_rppairing with deviceEndpointIp: \(deviceEndpointIp):\(rpPort)")
+        verboseLog("[IdeviceGateway] ensureRPConnection() calling tunnel_create_rppairing_with_options endpoint_selected=true port=\(rpPort)")
         try hostname.withCString { hostPtr in
             try withSockaddr(ip: deviceEndpointIp, port: rpPort) { sockaddrPtr, sockaddrLen in
-                err = tunnel_create_rppairing(
+                err = tunnel_create_rppairing_with_options(
                     sockaddrPtr,
                     sockaddrLen,
                     hostPtr,
                     pairingFile,
+                    false,
                     nil,
                     nil,
                     &adapter,
@@ -466,17 +477,27 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
         debugLog("[IdeviceGateway] ensureRPConnection() tunnel_create_rppairing succeeded, adapter: \(String(describing: adapter)), handshake: \(String(describing: handshake))")
     }
 
+    private enum PairingErrorCode: Int32 {
+        case invalidHostID = 18
+        // case pairingDialogResponsePending = 30 // Interactive pairing setup error, not an existing pairing file issue
+        // case userDeniedPairing = 31            // Interactive pairing setup error, not an existing pairing file issue
+        // case passwordProtected = 32            // Device passcode locked, not an invalid pairing file
+        case remotePairing = 103
+    }
+
     private func isPairingError(_ err: UnsafeMutablePointer<IdeviceFfiError>) -> Bool {
-        let code = err.pointee.code
-        // 103: RemotePairing, 18: InvalidHostID, 30: PairingDialogResponsePending, 31: UserDeniedPairing, 32: PasswordProtected
-        if code == 103 || code == 18 || code == 30 || code == 31 || code == 32 {
+        if PairingErrorCode(rawValue: err.pointee.code) != nil {
             return true
         }
         
         if let msgPtr = err.pointee.message {
             let msg = String(cString: msgPtr).lowercased()
-            if msg.contains("invalidconf") || msg.contains("pairing") || msg.contains("handshake") ||
-                msg.contains("connection reset") || msg.contains("connectionreset") {
+            if msg.contains("invalidconf")      || 
+               msg.contains("pairing")          || 
+               msg.contains("handshake")        ||
+               msg.contains("bad_certificate")  || 
+               msg.contains("certificate_unknown") 
+            {
                 return true
             }
         }
@@ -511,6 +532,9 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
             do {
                 try ensureRPConnection()
                 err = connect(adapter, handshake, &client)
+            } catch let gwErr as IdeviceGatewayError {
+                lastError = gwErr
+                throw gwErr
             } catch {
                 let reason = "Service connection retry failed: \(error.localizedDescription)"
                 let errObj = IdeviceGatewayError(.serviceError, reason: reason)
@@ -787,7 +811,7 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
         }
     }
 
-    private func syncFetchUDID() throws -> String? {
+    private func syncFetchUDID() throws -> String {
         debugLog("[SIDESTORE_COREDEVICE] FETCH_UDID_START mode=\(pairingFileType)")
         try verifyInitialized()
         if pairingFileType == .rppairing || usesCoreDevice {
@@ -864,49 +888,17 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
             }
             debugLog("[SIDESTORE_COREDEVICE] FETCH_UDID_PASS")
             return udid
-        } else {
-            var conn: OpaquePointer? = nil
-            let err = idevice_usbmuxd_new_default_connection(0, &conn)
-            if let err = err {
-                let code = err.pointee.code
-                let msg = self.getErrorMessage(from: err)
-                idevice_error_free(err)
-                debugLog("[SIDESTORE_COREDEVICE] FETCH_UDID_FAIL stage=usbmuxd code=\(code)")
-                throw IdeviceGatewayError(.connectionFailed, reason: "usbmuxd connection failed (code \(code)): \(msg)")
-            }
-
-            guard let conn = conn else {
-                throw IdeviceGatewayError(.connectionFailed, reason: "usbmuxd connection returned nil")
-            }
-            defer { idevice_usbmuxd_connection_free(conn) }
-            var devices: UnsafeMutablePointer<OpaquePointer?>? = nil
-            var count: Int32 = 0
-            let devErr = idevice_usbmuxd_get_devices(conn, &devices, &count)
-            if let devErr = devErr {
-                let code = devErr.pointee.code
-                let msg = self.getErrorMessage(from: devErr)
-                idevice_error_free(devErr)
-                debugLog("[SIDESTORE_COREDEVICE] FETCH_UDID_FAIL stage=usbmuxd_devices code=\(code)")
-                throw IdeviceGatewayError(.serviceError, reason: "usbmuxd get_devices failed (code \(code)): \(msg)")
-            }
-
-            var udidResult: String? = nil
-            if count > 0, let devicesPtr = devices, let firstDev = devicesPtr.pointee {
-                defer { idevice_usbmuxd_device_list_free(devices, count) }
-                if let udidPtr = idevice_usbmuxd_device_get_udid(firstDev) {
-                    udidResult = String(cString: udidPtr)
-                    idevice_string_free(udidPtr)
-                }
-            }
-            guard let udidResult, !udidResult.isEmpty else {
-                throw IdeviceGatewayError(.noConnection, reason: "No device UDID found on usbmuxd")
-            }
-            debugLog("[SIDESTORE_COREDEVICE] FETCH_UDID_PASS")
-            return udidResult
         }
+        // Query the real Lockdown service, not a cached/fake usbmuxd identity.
+        let udid = try syncGetLockdownValue(key: "UniqueDeviceID")
+        guard !udid.isEmpty else {
+            throw IdeviceGatewayError(.serviceError, reason: "lc_stage=uniqueDeviceID UniqueDeviceID string is empty")
+        }
+        debugLog("[SIDESTORE_COREDEVICE] FETCH_UDID_PASS")
+        return udid
     }
 
-    private func syncGetLockdownValue(key: String) throws -> String? {
+    private func syncGetLockdownValue(key: String) throws -> String {
         debugLog("[IdeviceGateway] getLockdownValue(key: \(key)) started, mode = .\(pairingFileType)")
         try verifyInitialized()
 
@@ -916,6 +908,37 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
             cleanup: lockdownd_client_free,
             serviceName: "lockdownd"
         ) { client in
+            if self.pairingFileType == .lockdown && !self.usesCoreDevice {
+                guard let pairingFileData = self.pairingFileData else {
+                    throw IdeviceGatewayError(.invalidPairingFile, reason: "Lockdown pairing data is unavailable")
+                }
+                var pf: OpaquePointer? = nil
+                let parseErr = pairingFileData.withUnsafeBytes { buf in
+                    idevice_pairing_file_from_bytes(buf.baseAddress?.assumingMemoryBound(to: UInt8.self), UInt(pairingFileData.count), &pf)
+                }
+                if let parseErr = parseErr {
+                    defer { safeFreeError(parseErr) }
+                    let msg = "code=\(parseErr.pointee.code) subcode=\(parseErr.pointee.sub_code)"
+                    throw IdeviceGatewayError(.invalidPairingFile, reason: "Failed to parse pairing file: \(msg)")
+                }
+                guard let pf else {
+                    throw IdeviceGatewayError(.invalidPairingFile, reason: "Lockdown pairing parse returned nil")
+                }
+                defer { idevice_pairing_file_free(pf) }
+                verboseLog("[IdeviceGateway] getLockdownValue starting lockdownd session for \(key)")
+                let sessionErr = lockdownd_start_session(client, pf)
+                if let sessionErr {
+                    defer { safeFreeError(sessionErr) }
+                    let msg = "code=\(sessionErr.pointee.code) subcode=\(sessionErr.pointee.sub_code)"
+                    debugLog("[IdeviceGateway] getLockdownValue lockdownd_start_session failed code=\(sessionErr.pointee.code) subcode=\(sessionErr.pointee.sub_code)")
+                    if self.isPairingError(sessionErr) {
+                        throw IdeviceGatewayError(.invalidPairingFile, reason: "Lockdown session failed (pairing invalid): \(msg)")
+                    } else {
+                        throw IdeviceGatewayError(.connectionFailed, reason: "Lockdown session failed: \(msg)")
+                    }
+                }
+            }
+
             var plistVal: plist_t? = nil
             verboseLog("[IdeviceGateway] getLockdownValue calling lockdownd_get_value for \(key)")
             let valErr = lockdownd_get_value(client, key, nil, &plistVal)
@@ -923,18 +946,25 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
                 let msg = self.getErrorMessage(from: valErr)
                 debugLog("[IdeviceGateway] getLockdownValue lockdownd_get_value failed for \(key): \(msg)")
                 defer { safeFreeError(valErr) }
-                throw IdeviceGatewayError(.serviceError, reason: "Failed to get lockdown value for key \(key), error: (\(msg))")
-            }
-            if let plistVal = plistVal {
-                defer {
-                    safeFreePlist(plistVal)
+                if self.isPairingError(valErr) {
+                    throw IdeviceGatewayError(.invalidPairingFile, reason: "Failed to get lockdown value for key \(key), error: (\(msg))")
+                } else {
+                    throw IdeviceGatewayError(.serviceError, reason: "Failed to get lockdown value for key \(key), error: (\(msg))")
                 }
-                let val = getRustPlistString(plistVal)
-                verboseLog("[IdeviceGateway] getLockdownValue getRustPlistString returned: \(String(describing: val))")
-                return val
             }
-            debugLog("[IdeviceGateway] getLockdownValue plistVal is nil for \(key)")
-            return nil
+            guard let plistVal = plistVal else {
+                debugLog("[IdeviceGateway] getLockdownValue plistVal is nil for \(key)")
+                throw IdeviceGatewayError(.serviceError, reason: "Lockdown value for key '\(key)' is missing")
+            }
+            defer {
+                safeFreePlist(plistVal)
+            }
+            guard let val = getRustPlistString(plistVal) else {
+                debugLog("[IdeviceGateway] getLockdownValue failed to parse plist string for \(key)")
+                throw IdeviceGatewayError(.serviceError, reason: "Lockdown value for key '\(key)' could not be decoded as string")
+            }
+            verboseLog("[IdeviceGateway] getLockdownValue returned a decoded string")
+            return val
         }
     }
 
@@ -1339,7 +1369,7 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
         }
     }
 
-    private func getAppPaths(appId: String) throws -> (container: String, bundlePath: String) {
+    private func getAppPaths(appId: String) throws -> (container: String, bundlePath: String, executableName: String?) {
         debugLog("[IdeviceGateway] getAppPaths() called, appId: \(appId)")
         return try performWithEitherService(
             connectRP: installation_proxy_connect_rsd,
@@ -1372,6 +1402,7 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
             defer { idevice_plist_array_free(plistArray, UInt(outLen)) }
             var container = ""
             var bundlePath = ""
+            var executableName: String? = nil
             
             for i in 0..<outLen {
                 if let plistVal = plistArray[i] {
@@ -1392,6 +1423,15 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
                             verboseLog("[IdeviceGateway] getAppPaths() found Path: \(bundlePath)")
                         }
                     }
+
+                    // CFBundleExecutable
+                    let execPlist = plist_dict_get_item(plistVal, "CFBundleExecutable")
+                    if let execPlist = execPlist {
+                        if let ptr = getRustPlistString(execPlist) {
+                            executableName = ptr
+                            verboseLog("[IdeviceGateway] getAppPaths() found CFBundleExecutable present=\(executableName != nil)")
+                        }
+                    }
                 }
             }
             
@@ -1399,13 +1439,14 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
                 debugLog("[IdeviceGateway] getAppPaths() container or bundlePath is empty")
                 throw IdeviceGatewayError(.serviceError, reason: "Failed to resolve app paths")
             }
-            return (container, bundlePath)
+            return (container, bundlePath, executableName)
         }
     }
     
-    private func sendDebugProxyCommand(client: OpaquePointer, name: String, args: [String]) throws {
+    @discardableResult
+    private func sendDebugProxyCommand(client: OpaquePointer, name: String, args: [String]) throws -> String? {
         debugLog("[IdeviceGateway] sendDebugProxyCommand() called, name: \(name), args: \(args)")
-        try name.withCString { namePtr in
+        return try name.withCString { namePtr in
             var argPtrs = args.map { UnsafePointer<Int8>(strdup($0)) }
             defer {
                 for ptr in argPtrs {
@@ -1429,8 +1470,10 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
                     let respStr = String(cString: response)
                     verboseLog("[IdeviceGateway] sendDebugProxyCommand() got response: \(respStr)")
                     free(response)
+                    return respStr
                 } else {
                     debugLog("[IdeviceGateway] sendDebugProxyCommand() got empty response")
+                    return nil
                 }
             } else {
                 debugLog("[IdeviceGateway] sendDebugProxyCommand() failed to construct command \(name)")
@@ -1439,222 +1482,203 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
         }
     }
     
-    private func launchAppPre17(appId: String) throws {
-        debugLog("[IdeviceGateway] launchAppPre17() called for appId: \(appId)")
-        let (container, bundlePath) = try getAppPaths(appId: appId)
-        
+    private func startDebugserverService() throws -> UInt16 {
+        var port: UInt16 = 0
+        var ssl: Bool = false
+
         try performWithEitherService(
             connectRP: lockdownd_connect_rsd,
             connectLockdown: lockdownd_connect,
             cleanup: lockdownd_client_free,
             serviceName: "lockdownd"
         ) { lockdownClient in
-            var port: UInt16 = 0
-            var ssl: Bool = false
-            
-            verboseLog("[IdeviceGateway] launchAppPre17() starting debugserver service")
+            verboseLog("[IdeviceGateway] starting debugserver service")
             let err = "com.apple.debugserver".withCString { serviceNamePtr in
                 return lockdownd_start_service(lockdownClient, serviceNamePtr, &port, &ssl)
             }
             if let err = err {
-                let msg = self.getErrorMessage(from: err)
-                debugLog("[IdeviceGateway] launchAppPre17() failed to start debugserver: \(msg)")
+                debugLog("[IdeviceGateway] failed to start debugserver code=\(err.pointee.code) subcode=\(err.pointee.sub_code)")
                 defer { idevice_error_free(err) }
-                throw IdeviceGatewayError(.serviceError, reason: "Failed to start debugserver service, error: (\(msg))")
+                throw IdeviceGatewayError(.serviceError, reason: "Failed to start debugserver service: code=\(err.pointee.code) subcode=\(err.pointee.sub_code)")
             }
-            debugLog("[IdeviceGateway] launchAppPre17() debugserver started on port: \(port)")
-            
-            var addr: OpaquePointer? = nil
-            var addrErr = idevice_usbmuxd_default_addr_new(&addr)
-            if let addrErr = addrErr {
-                debugLog("[IdeviceGateway] launchAppPre17() default_addr_new failed")
-                defer { idevice_error_free(addrErr) }
-                throw IdeviceGatewayError(.connectionFailed, reason: "Failed to get usbmuxd default addr")
-            }
-            guard let addr = addr else {
-                debugLog("[IdeviceGateway] launchAppPre17() usbmuxd default addr is nil")
-                throw IdeviceGatewayError(.connectionFailed, reason: "Usbmuxd default addr was nil")
-            }
-            defer { idevice_usbmuxd_addr_free(addr) }
-            
-            var conn: OpaquePointer? = nil
-            verboseLog("[IdeviceGateway] launchAppPre17() creating default usbmuxd connection")
-            let connErr = idevice_usbmuxd_new_default_connection(0, &conn)
-            if let connErr = connErr {
-                debugLog("[IdeviceGateway] launchAppPre17() new_default_connection failed")
-                defer { idevice_error_free(connErr) }
-                throw IdeviceGatewayError(.connectionFailed, reason: "Failed to create usbmuxd connection")
-            }
-            guard let conn = conn else {
-                debugLog("[IdeviceGateway] launchAppPre17() usbmuxd connection is nil")
-                throw IdeviceGatewayError(.connectionFailed, reason: "Usbmuxd connection was nil")
-            }
-            var connNeedsFree = true
-            defer {
-                if connNeedsFree {
-                    idevice_usbmuxd_connection_free(conn)
-                }
-            }
-            
-            var devices: UnsafeMutablePointer<OpaquePointer?>? = nil
-            var count: Int32 = 0
-            let devErr = idevice_usbmuxd_get_devices(conn, &devices, &count)
-            if let devErr = devErr {
-                debugLog("[IdeviceGateway] launchAppPre17() get_devices failed")
-                defer { idevice_error_free(devErr) }
-                throw IdeviceGatewayError(.connectionFailed, reason: "Failed to list usbmuxd devices")
-            }
-            
-            guard count > 0, let devicesPtr = devices, let firstDev = devicesPtr.pointee else {
-                verboseLog("[IdeviceGateway] launchAppPre17() no devices found on usbmuxd")
-                throw IdeviceGatewayError(.connectionFailed, reason: "No devices found on usbmuxd")
-            }
-            defer { idevice_usbmuxd_device_list_free(devices, count) }
-            
-            let deviceID = idevice_usbmuxd_device_get_device_id(firstDev)
-            verboseLog("[IdeviceGateway] launchAppPre17() connecting to deviceID \(deviceID) debugserver port \(port)")
-            
-            var debugDevice: OpaquePointer? = nil
-            let connectErr = "minimuxer-debug".withCString { labelPtr in
-                return idevice_usbmuxd_connect_to_device(conn, deviceID, port, labelPtr, &debugDevice)
-            }
-            if let connectErr = connectErr {
-                debugLog("[IdeviceGateway] launchAppPre17() connect_to_device failed")
-                defer { idevice_error_free(connectErr) }
-                throw IdeviceGatewayError(.connectionFailed, reason: "Failed to connect to debugserver port \(port)")
-            }
-            connNeedsFree = false
-            
-            guard let debugDevice = debugDevice else {
-                debugLog("[IdeviceGateway] launchAppPre17() debug device handle is nil")
-                throw IdeviceGatewayError(.connectionFailed, reason: "Debug device handle was nil")
-            }
-            var debugDeviceNeedsFree = true
-            defer {
-                if debugDeviceNeedsFree {
-                    idevice_free(debugDevice)
-                }
-            }
-            
-            var stream: OpaquePointer? = nil
-            verboseLog("[IdeviceGateway] launchAppPre17() converting debug device connection to stream")
-           let streamErr = idevice_to_stream(debugDevice, &stream)
-           if let streamErr = streamErr {
-               debugLog("[IdeviceGateway] launchAppPre17() idevice_to_stream failed")
-               defer { idevice_error_free(streamErr) }
-               throw IdeviceGatewayError(.serviceError, reason: "Failed to convert device connection to stream")
-           }
-            debugDeviceNeedsFree = false
-            
-            guard let stream = stream else {
-                debugLog("[IdeviceGateway] launchAppPre17() stream is nil")
-                throw IdeviceGatewayError(.serviceError, reason: "Stream was nil")
-            }
-            var streamNeedsFree = true
-            defer {
-                if streamNeedsFree {
-                    idevice_stream_free(stream)
-                }
-            }
-            
-            var debugProxyClient: OpaquePointer? = nil
-            verboseLog("[IdeviceGateway] launchAppPre17() creating debug proxy client")
-            let proxyErr = debug_proxy_new(stream, &debugProxyClient)
-            if let proxyErr = proxyErr {
-                let msg = self.getErrorMessage(from: proxyErr)
-                debugLog("[IdeviceGateway] launchAppPre17() debug_proxy_new failed: \(msg)")
-                defer { idevice_error_free(proxyErr) }
-                throw IdeviceGatewayError(.serviceError, reason: "Failed to create debug proxy client, error: (\(msg))")
-            }
-            streamNeedsFree = false
-            
-            guard let debugProxyClient = debugProxyClient else {
-                debugLog("[IdeviceGateway] launchAppPre17() debugProxyClient is nil")
-                throw IdeviceGatewayError(.serviceError, reason: "Debug proxy client was nil")
-            }
-            defer { debug_proxy_free(debugProxyClient) }
-            
-            verboseLog("[IdeviceGateway] launchAppPre17() configuring debug proxy workspace")
-            try self.sendDebugProxyCommand(client: debugProxyClient, name: "QSetMaxPacketSize", args: ["\(MinimuxerConstants.maxPacketSize)"])
-            try self.sendDebugProxyCommand(client: debugProxyClient, name: "QSetWorkingDir", args: [container])
-            
-            try bundlePath.withCString { bundlePathPtr in
-                var argvptrs: [UnsafePointer<Int8>?] = [bundlePathPtr, bundlePathPtr]
-                var response: UnsafeMutablePointer<Int8>? = nil
-                verboseLog("[IdeviceGateway] launchAppPre17() setting argv for \(bundlePath)")
-                let argvErr = debug_proxy_set_argv(debugProxyClient, &argvptrs, UInt(argvptrs.count), &response)
-                if let argvErr = argvErr {
-                    let msg = self.getErrorMessage(from: argvErr)
-                    debugLog("[IdeviceGateway] launchAppPre17() debug_proxy_set_argv failed: \(msg)")
-                    defer { idevice_error_free(argvErr) }
-                    throw IdeviceGatewayError(.serviceError, reason: "Failed to set debug proxy argv, error: (\(msg))")
-                }
-                if let response = response {
-                    let respStr = String(cString: response)
-                    verboseLog("[IdeviceGateway] launchAppPre17() argv response: \(respStr)")
-                    free(response)
-                }
-            }
-            
-            verboseLog("[IdeviceGateway] launchAppPre17() launching application")
-            try self.sendDebugProxyCommand(client: debugProxyClient, name: "qLaunchSuccess", args: [])
-            try self.sendDebugProxyCommand(client: debugProxyClient, name: "D", args: [])
-            debugLog("[IdeviceGateway] launchAppPre17() app launched successfully")
         }
+
+        debugLog("[IdeviceGateway] debugserver started on port: \(port), ssl: \(ssl)")
+        return port
     }
 
-    private func getDummyffiError() -> UnsafeMutablePointer<IdeviceFfiError>? {
-        debugLog("[IdeviceGateway] getDummyffiError() called")
-        var client: OpaquePointer? = nil
-        let err = lockdownd_connect(nil, &client)
-        debugLog("[IdeviceGateway] getDummyffiError() returned: \(String(describing: err))")
-        return err
+    private func connectDebugProxy(port: UInt16) throws -> OpaquePointer {
+        var addr: OpaquePointer? = nil
+        let addrErr = idevice_usbmuxd_default_addr_new(&addr)
+        if let addrErr = addrErr {
+            debugLog("[IdeviceGateway] connectDebugProxy default_addr_new failed")
+            defer { idevice_error_free(addrErr) }
+            throw IdeviceGatewayError(.connectionFailed, reason: "Failed to get usbmuxd default addr")
+        }
+        guard let addr = addr else {
+            throw IdeviceGatewayError(.connectionFailed, reason: "Usbmuxd default addr was nil")
+        }
+        defer { idevice_usbmuxd_addr_free(addr) }
+
+        var conn: OpaquePointer? = nil
+        let connErr = idevice_usbmuxd_new_default_connection(0, &conn)
+        if let connErr = connErr {
+            debugLog("[IdeviceGateway] connectDebugProxy new_default_connection failed")
+            defer { idevice_error_free(connErr) }
+            throw IdeviceGatewayError(.connectionFailed, reason: "Failed to create usbmuxd connection")
+        }
+        guard let conn = conn else {
+            throw IdeviceGatewayError(.connectionFailed, reason: "Usbmuxd connection was nil")
+        }
+        defer { idevice_usbmuxd_connection_free(conn) }
+
+        var devices: UnsafeMutablePointer<OpaquePointer?>? = nil
+        var count: Int32 = 0
+        let devErr = idevice_usbmuxd_get_devices(conn, &devices, &count)
+        if let devErr = devErr {
+            debugLog("[IdeviceGateway] connectDebugProxy get_devices failed")
+            defer { idevice_error_free(devErr) }
+            throw IdeviceGatewayError(.connectionFailed, reason: "Failed to list usbmuxd devices")
+        }
+        guard count > 0, let devicesPtr = devices, let firstDev = devicesPtr.pointee else {
+            throw IdeviceGatewayError(.connectionFailed, reason: "No devices found on usbmuxd")
+        }
+        defer { idevice_usbmuxd_device_list_free(devices, count) }
+
+        let deviceID = idevice_usbmuxd_device_get_device_id(firstDev)
+        var debugDevice: OpaquePointer? = nil
+        let connectErr = "minimuxer-debug".withCString { labelPtr in
+            idevice_usbmuxd_connect_to_device(conn, deviceID, port, labelPtr, &debugDevice)
+        }
+        if let connectErr = connectErr {
+            debugLog("[IdeviceGateway] connectDebugProxy connect_to_device failed")
+            defer { idevice_error_free(connectErr) }
+            throw IdeviceGatewayError(.connectionFailed, reason: "Failed to connect to debugserver port \(port)")
+        }
+        guard let debugDevice = debugDevice else {
+            throw IdeviceGatewayError(.connectionFailed, reason: "Debug device handle was nil")
+        }
+        defer { idevice_free(debugDevice) }
+
+        var stream: OpaquePointer? = nil
+        let streamErr = idevice_to_stream(debugDevice, &stream)
+        if let streamErr = streamErr {
+            debugLog("[IdeviceGateway] connectDebugProxy idevice_to_stream failed")
+            defer { idevice_error_free(streamErr) }
+            throw IdeviceGatewayError(.serviceError, reason: "Failed to convert device connection to stream")
+        }
+        guard let stream = stream else {
+            throw IdeviceGatewayError(.serviceError, reason: "Stream was nil")
+        }
+
+        var debugProxyClient: OpaquePointer? = nil
+        let proxyErr = debug_proxy_new(stream, &debugProxyClient)
+        if let proxyErr = proxyErr {
+            let msg = "code=\(proxyErr.pointee.code) subcode=\(proxyErr.pointee.sub_code)"
+            debugLog("[IdeviceGateway] connectDebugProxy debug_proxy_new failed code=\(proxyErr.pointee.code) subcode=\(proxyErr.pointee.sub_code)")
+            defer { idevice_error_free(proxyErr) }
+            idevice_stream_free(stream)
+            throw IdeviceGatewayError(.serviceError, reason: "Failed to create debug proxy client, error: (\(msg))")
+        }
+        guard let debugProxyClient = debugProxyClient else {
+            idevice_stream_free(stream)
+            throw IdeviceGatewayError(.serviceError, reason: "Debug proxy client was nil")
+        }
+        return debugProxyClient
+    }
+
+    private func launchAppPre17(appId: String) throws {
+        debugLog("[IdeviceGateway] launchAppPre17() called for appId: \(appId)")
+        let (container, bundlePath, _) = try getAppPaths(appId: appId)
+
+        let port = try startDebugserverService()
+        let debugProxyClient = try connectDebugProxy(port: port)
+        defer { debug_proxy_free(debugProxyClient) }
+
+        verboseLog("[IdeviceGateway] launchAppPre17() configuring debug proxy workspace")
+        try self.sendDebugProxyCommand(client: debugProxyClient, name: "QSetMaxPacketSize", args: ["\(MinimuxerConstants.maxPacketSize)"])
+        try self.sendDebugProxyCommand(client: debugProxyClient, name: "QSetWorkingDir", args: [container])
+
+        try bundlePath.withCString { bundlePathPtr in
+            var argvptrs: [UnsafePointer<Int8>?] = [bundlePathPtr, bundlePathPtr]
+            var response: UnsafeMutablePointer<Int8>? = nil
+            verboseLog("[IdeviceGateway] launchAppPre17() setting argv for \(bundlePath)")
+            let argvErr = debug_proxy_set_argv(debugProxyClient, &argvptrs, UInt(argvptrs.count), &response)
+            if let argvErr = argvErr {
+                let msg = self.getErrorMessage(from: argvErr)
+                debugLog("[IdeviceGateway] launchAppPre17() debug_proxy_set_argv failed: \(msg)")
+                defer { idevice_error_free(argvErr) }
+                throw IdeviceGatewayError(.serviceError, reason: "Failed to set debug proxy argv, error: (\(msg))")
+            }
+            if let response = response {
+                let respStr = String(cString: response)
+                verboseLog("[IdeviceGateway] launchAppPre17() argv response: \(respStr)")
+                free(response)
+            }
+        }
+
+        verboseLog("[IdeviceGateway] launchAppPre17() launching application")
+        try self.sendDebugProxyCommand(client: debugProxyClient, name: "qLaunchSuccess", args: [])
+        try self.sendDebugProxyCommand(client: debugProxyClient, name: "D", args: [])
+        debugLog("[IdeviceGateway] launchAppPre17() app launched successfully")
     }
 
     private func syncDebugApp(appId: String) throws {
-        debugLog("[IdeviceGateway] debugApp() called, appId: \(appId)")
+        debugLog("[IdeviceGateway] debugApp() called mode=\(pairingFileType)")
         try verifyInitialized()
-        guard let versionStr = try syncGetLockdownValue(key: "ProductVersion"),
-              let majorStr = versionStr.split(separator: ".").first,
-              let major = Int(majorStr) else {
-            debugLog("[IdeviceGateway] debugApp() failed to get ProductVersion")
-            throw IdeviceGatewayError(.serviceError, reason: "Failed to get product version for JIT")
-        }
-        
-        verboseLog("[IdeviceGateway] debugApp() ProductVersion major: \(major)")
-        if major < 17 {
+
+        if pairingFileType == .lockdown {
+            verboseLog("[IdeviceGateway] debugApp() attempting legacy lockdownd debugserver via launchAppPre17")
             try launchAppPre17(appId: appId)
         } else {
-            try performWithEitherService(
-                connectRP: debug_proxy_connect_rsd,
-                connectLockdown: { [weak self] _, _ in
-                    debugLog("[IdeviceGateway] debugApp() lockdown placeholder called")
-                    return self?.getDummyffiError()
-                },
+            let (_, bundlePath, executableName) = try getAppPaths(appId: appId)
+            try performWithService(
+                connect: debug_proxy_connect_rsd,
                 cleanup: debug_proxy_free,
                 serviceName: "debug proxy"
             ) { client in
-                debugLog("[IdeviceGateway] debugApp() connection validation succeeded")
+                guard let pid = try self.findProcessPID(
+                    appId: appId,
+                    bundlePath: bundlePath.isEmpty ? nil : bundlePath,
+                    executableName: executableName,
+                    sendCommand: { name, args in
+                        try self.sendDebugProxyCommand(client: client, name: name, args: args)
+                    }
+                ) else {
+                    let targetName = executableName ?? appId
+                    throw IdeviceGatewayError(
+                        .serviceError,
+                        reason: "App '\(targetName)' is not running. Please open the app and keep it in the background, then enable JIT."
+                    )
+                }
+                if pid > 0 {
+                    debugLog("[IdeviceGateway] Attaching for JIT pid_present=\(pid > 0)")
+                    let commands = [("vAttach;\(String(format: "%x", pid))", [String]()), ("D", [String]())]
+                    for (name, args) in commands {
+                        try self.sendDebugProxyCommand(client: client, name: name, args: args)
+                    }
+                }
+                debugLog("[IdeviceGateway] debugApp() attached and detached pid_present=\(pid > 0)")
             }
         }
     }
 
     private func syncDebugProcess(pid: UInt32) throws {
-        debugLog("[IdeviceGateway] debugProcess() called, pid: \(pid)")
+        debugLog("[IdeviceGateway] debugProcess() called pid_present=\(pid > 0) mode=\(pairingFileType)")
         try verifyInitialized()
-        try performWithEitherService(
-            connectRP: debug_proxy_connect_rsd,
-            connectLockdown: { [weak self] _, _ in
-                debugLog("[IdeviceGateway] debugProcess() lockdown placeholder called")
-                return self?.getDummyffiError()
-            },
-            cleanup: debug_proxy_free,
-            serviceName: "debug proxy"
-        ) { client in
-            let commands = [("vAttach", [String(format: "%02X", pid)]), ("D", [])]
-            for (name, args) in commands {
-                try sendDebugProxyCommand(client: client, name: name, args: args)
+        if pairingFileType == .rppairing {
+            try performWithService(
+                connect: debug_proxy_connect_rsd,
+                cleanup: debug_proxy_free,
+                serviceName: "debug proxy"
+            ) { client in
+                let commands = [("vAttach;\(String(format: "%x", pid))", [String]()), ("D", [String]())]
+                for (name, args) in commands {
+                    try self.sendDebugProxyCommand(client: client, name: name, args: args)
+                }
             }
+        } else {
+            throw IdeviceGatewayError(.unsupportedOperation, reason: "Attaching to process by PID is only supported in .rppairing mode")
         }
     }
 
@@ -1681,7 +1705,7 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
             }
 
             let path = docsPath.hasPrefix("file://") ? String(docsPath.dropFirst(7)) : docsPath
-            let dumpDir = "\(path)/PROVISION"
+            let dumpDir = path.hasSuffix("/Profiles") || path.hasSuffix("/Profiles/") ? path : "\(path)/Profiles"
             verboseLog("[IdeviceGateway] dumpProfiles() writing profiles to: \(dumpDir), count: \(outCount)")
             try? FileManager.default.createDirectory(atPath: dumpDir, withIntermediateDirectories: true)
 
@@ -2154,42 +2178,6 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
         return (rpf, identifier)
     }
 
-    private func findFreePort() -> UInt16 {
-        var actualPort: UInt16 = 0
-        verboseLog("[IdeviceGateway] findFreePort() finding free port")
-        let socketFd = socket(AF_INET, SOCK_STREAM, 0)
-        if socketFd >= 0 {
-            var addr = sockaddr_in()
-            addr.sin_len = __uint8_t(MemoryLayout<sockaddr_in>.size)
-            addr.sin_family = sa_family_t(AF_INET)
-            addr.sin_port = 0
-            addr.sin_addr.s_addr = INADDR_ANY
-            let bindRes = withUnsafePointer(to: &addr) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    bind(socketFd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-                }
-            }
-            if bindRes == 0 {
-                var len = socklen_t(MemoryLayout<sockaddr_in>.size)
-                let nameRes = withUnsafeMutablePointer(to: &addr) {
-                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                        getsockname(socketFd, $0, &len)
-                    }
-                }
-                if nameRes == 0 {
-                    actualPort = UInt16(bigEndian: addr.sin_port)
-                    verboseLog("[IdeviceGateway] findFreePort() bound to port: \(actualPort)")
-                }
-            }
-            close(socketFd)
-        }
-
-        if actualPort == 0 {
-            actualPort = 5555 // fallback
-            verboseLog("[IdeviceGateway] findFreePort() fallback to port: \(actualPort)")
-        }
-        return actualPort
-    }
 
     private func finalizeAndSavePairedDevice(
         rpf: OpaquePointer,
@@ -2256,27 +2244,66 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
         hostName: String,
         hostModel: String,
         outPath: String,
+        resolveFileName: ((String, String) -> String)?,
         onReady: @escaping (String, UInt16, [String: String]) -> Void,
         onPin: @escaping (String) -> Void
     ) throws -> PairedDeviceRecord {
         debugLog("[IdeviceGateway] startWirelessPair() called, hostName: \(hostName), hostModel: \(hostModel), outPath: \(outPath)")
-        
-        let (rpf, identifier) = try generatePairingFile(hostName: hostName)
-        defer { rp_pairing_file_free(rpf) }
 
-        let actualPort = findFreePort()
+        var handle: OpaquePointer? = nil
+        var serviceIdC: UnsafeMutablePointer<CChar>? = nil
+        var txtData: UnsafeMutablePointer<UInt8>? = nil
+        var txtLen: UInt = 0
+        var hostAltIrk = [UInt8](repeating: 0, count: 16)
 
-        let txtRecords = [
-            "txtvers": "1",
-            "id": identifier,
-            "model": hostModel,
-            "name": hostName
-        ]
-        verboseLog("[IdeviceGateway] startWirelessPair() invoking onReady")
-        onReady(identifier, actualPort, txtRecords)
+        verboseLog("[IdeviceGateway] startWirelessPair() calling pairable_host_prepare...")
+        let prepareErr = pairable_host_prepare(
+            hostName,
+            hostModel,
+            false,
+            &handle,
+            &serviceIdC,
+            &txtData,
+            &txtLen,
+            &hostAltIrk
+        )
+
+        if let prepareErr = prepareErr {
+            debugLog("[IdeviceGateway] startWirelessPair() pairable_host_prepare failed")
+            defer { idevice_error_free(prepareErr) }
+            throw IdeviceGatewayError(.serviceError, reason: "pairable_host_prepare failed")
+        }
+
+        guard let handle = handle, let serviceIdC = serviceIdC else {
+            debugLog("[IdeviceGateway] startWirelessPair() handle or serviceId is nil")
+            throw IdeviceGatewayError(.serviceError, reason: "Invalid pairable host handle")
+        }
+        defer { pairable_host_free(handle) }
+
+        let identifier = String(cString: serviceIdC)
+        idevice_string_free(serviceIdC)
+
+        var txtRecords: [String: String] = [:]
+        if let txtData = txtData, txtLen > 0 {
+            let data = Data(bytes: txtData, count: Int(txtLen))
+            idevice_data_free(txtData, txtLen)
+            if let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: String] {
+                txtRecords = plist
+            }
+        }
+
+        let acceptor = try TCPAcceptor()
+        verboseLog("[IdeviceGateway] startWirelessPair() bound listening socket on port \(acceptor.port), invoking onReady")
+        onReady(identifier, acceptor.port, txtRecords)
+
+        verboseLog("[IdeviceGateway] startWirelessPair() waiting for incoming connection via accept()...")
+        let clientFd = try acceptor.accept()
+        defer { close(clientFd) }
+
+        verboseLog("[IdeviceGateway] startWirelessPair() client connected on fd: \(clientFd), starting handshake via pairable_host_accept_fd...")
 
         var pairedRpf: OpaquePointer? = nil
-        var hostAltIrk = [UInt8](repeating: 0, count: 16)
+        var peerDevicePtr: UnsafeMutablePointer<RpPairingPeerDeviceC>? = nil
 
         class PinContext {
             let callback: (String) -> Void
@@ -2288,11 +2315,9 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
         let pinContextPtr = Unmanaged.passRetained(pinContextObj).toOpaque()
         defer { Unmanaged<PinContext>.fromOpaque(pinContextPtr).release() }
 
-        verboseLog("[IdeviceGateway] startWirelessPair() waiting for connection via pairable_host_accept...")
-        let acceptErr = pairable_host_accept(
-            hostName,
-            hostModel,
-            actualPort,
+        let acceptErr = pairable_host_accept_fd(
+            handle,
+            clientFd,
             { pin, context in
                 guard let pin = pin, let context = context else { return }
                 let ctxObj = Unmanaged<PinContext>.fromOpaque(context).takeUnretainedValue()
@@ -2301,12 +2326,12 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
                 ctxObj.callback(pinStr)
             },
             pinContextPtr,
-            &hostAltIrk,
+            &peerDevicePtr,
             &pairedRpf
         )
 
         if let acceptErr = acceptErr {
-            debugLog("[IdeviceGateway] startWirelessPair() pairable_host_accept failed")
+            debugLog("[IdeviceGateway] startWirelessPair() pairable_host_accept_fd failed")
             defer { idevice_error_free(acceptErr) }
             throw IdeviceGatewayError(.serviceError, reason: "Pairing failed or cancelled")
         }
@@ -2317,14 +2342,73 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
         }
         defer { rp_pairing_file_free(pairedRpf) }
 
+        var peerName = hostName
+        var peerModel = hostModel
+        var peerUdid: String? = nil
+
+        if let peer = peerDevicePtr {
+            defer { rppairing_peer_device_free(peer) }
+            let p = peer.pointee
+            if let namePtr = p.name, let str = String(validatingUTF8: namePtr), !str.isEmpty {
+                peerName = str
+            }
+            if let modelPtr = p.model, let str = String(validatingUTF8: modelPtr), !str.isEmpty {
+                peerModel = str
+            }
+            if let udidPtr = p.udid, let str = String(validatingUTF8: udidPtr), !str.isEmpty {
+                peerUdid = str
+            }
+        }
+
+        let finalOutPath = resolveFinalPairingPath(
+            outPath: outPath,
+            peerName: peerName,
+            peerModel: peerModel,
+            resolveFileName: resolveFileName
+        )
+        verboseLog("[IdeviceGateway] startWirelessPair() saving paired device metadata_present=true")
+
         return try finalizeAndSavePairedDevice(
             rpf: pairedRpf,
-            hostName: hostName,
-            hostModel: hostModel,
-            outPath: outPath,
-            fallbackUdid: identifier,
+            hostName: peerName,
+            hostModel: peerModel,
+            outPath: finalOutPath,
+            fallbackUdid: peerUdid ?? identifier,
             initialAltIrk: hostAltIrk
         )
+    }
+
+    private func resolveFinalPairingPath(
+        outPath: String,
+        peerName: String,
+        peerModel: String,
+        resolveFileName: ((String, String) -> String)?
+    ) -> String {
+        let outDir: String
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: outPath, isDirectory: &isDirectory), isDirectory.boolValue {
+            outDir = outPath
+        } else if (outPath as NSString).pathExtension.isEmpty {
+            outDir = outPath
+        } else {
+            outDir = (outPath as NSString).deletingLastPathComponent
+        }
+
+        let finalFileName: String
+        if let resolveFileName = resolveFileName {
+            finalFileName = resolveFileName(peerName, peerModel)
+        } else if !(outPath as NSString).lastPathComponent.isEmpty && !(outPath as NSString).pathExtension.isEmpty {
+            finalFileName = (outPath as NSString).lastPathComponent
+        } else {
+            let spaceReplaced = "\(peerName)_\(peerModel)"
+                .replacingOccurrences(of: " ", with: "_")
+                .replacingOccurrences(of: "/", with: "_")
+                .replacingOccurrences(of: ":", with: "_")
+            let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
+            let sanitized = spaceReplaced.unicodeScalars.filter { allowed.contains($0) }.map(String.init).joined()
+            finalFileName = sanitized.isEmpty ? MinimuxerConstants.defaultRPPairingFileName : "\(sanitized)\(MinimuxerConstants.rpPairingFileSuffix)"
+        }
+        return outDir.isEmpty ? finalFileName : (outDir as NSString).appendingPathComponent(finalFileName)
     }
 
     private func syncTriggerWirelessPair(
@@ -2333,6 +2417,7 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
         hostName: String,
         hostModel: String,
         outPath: String,
+        resolveFileName: ((String, String) -> String)?,
         onRequestPin: @escaping (@escaping (String) -> Void) -> Void
     ) throws -> PairedDeviceRecord {
         debugLog("[IdeviceGateway] triggerWirelessPair() called, targetIp: \(targetIp), targetPort: \(targetPort), hostName: \(hostName), hostModel: \(hostModel), outPath: \(outPath)")
@@ -2356,6 +2441,7 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
         defer { Unmanaged<PinContext>.fromOpaque(pinContextPtr).release() }
 
         var err: UnsafeMutablePointer<IdeviceFfiError>? = nil
+        var peerDevicePtr: UnsafeMutablePointer<RpPairingPeerDeviceC>? = nil
 
         verboseLog("[IdeviceGateway] triggerWirelessPair() pairing via rppairing_pair_network to \(targetIp):\(targetPort)...")
         try hostName.withCString { hostPtr in
@@ -2383,7 +2469,8 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
                         guard let pinStr = enteredPin, let p = strdup(pinStr) else { return nil }
                         return UnsafePointer(p)
                     },
-                    pinContextPtr
+                    pinContextPtr,
+                    &peerDevicePtr
                 )
             }
         }
@@ -2395,14 +2482,41 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
             throw IdeviceGatewayError(.serviceError, reason: msg)
         }
 
-        // This idevice revision updates rpf in place and exposes no peer-result struct.
+        var peerName = hostName
+        var peerModel = hostModel
+        var peerUdid: String? = nil
+        var peerAltIrk: [UInt8]? = nil
+
+        if let peer = peerDevicePtr {
+            defer { rppairing_peer_device_free(peer) }
+            let p = peer.pointee
+            if let namePtr = p.name {
+                peerName = String(cString: namePtr)
+            }
+            if let modelPtr = p.model {
+                peerModel = String(cString: modelPtr)
+            }
+            if let udidPtr = p.udid {
+                peerUdid = String(cString: udidPtr)
+            }
+            peerAltIrk = withUnsafeBytes(of: p.alt_irk) { Array($0) }
+        }
+
+        let finalOutPath = resolveFinalPairingPath(
+            outPath: outPath,
+            peerName: peerName,
+            peerModel: peerModel,
+            resolveFileName: resolveFileName
+        )
+        verboseLog("[IdeviceGateway] triggerWirelessPair() saving paired device metadata_present=true")
+
         return try finalizeAndSavePairedDevice(
             rpf: rpf,
-            hostName: hostName,
-            hostModel: hostModel,
-            outPath: outPath,
-            fallbackUdid: identifier,
-            initialAltIrk: nil
+            hostName: peerName,
+            hostModel: peerModel,
+            outPath: finalOutPath,
+            fallbackUdid: peerUdid ?? identifier,
+            initialAltIrk: peerAltIrk
         )
     }
 
@@ -2583,21 +2697,21 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
 
 // Async FFI Dispatcher Extensions
 extension IdeviceGateway {
-    public func start(pairingFileContent: String) async throws {
+    public func start(pairingFileContent: String, preferred: PairingProtocol?) async throws {
         try await withFFIDispatch(on: self.ffiQueue) {
             defer { if self.batchCount == 0 { self.releaseTransport() } }
-            return try self.syncStart(pairingFileContent: pairingFileContent)
+            return try self.syncStart(pairingFileContent: pairingFileContent, preferred: preferred)
         }
     }
 
-    public func fetchUDID() async throws -> String? {
+    public func fetchUDID() async throws -> String {
         try await withFFIDispatch(on: self.ffiQueue) {
             defer { if self.batchCount == 0 { self.releaseTransport() } }
             return try self.syncFetchUDID()
         }
     }
 
-    public func getLockdownValue(key: String) async throws -> String? {
+    public func getLockdownValue(key: String) async throws -> String {
         try await withFFIDispatch(on: self.ffiQueue) {
             defer { if self.batchCount == 0 { self.releaseTransport() } }
             return try self.syncGetLockdownValue(key: key)
@@ -2708,6 +2822,7 @@ extension IdeviceGateway {
         hostName: String,
         hostModel: String,
         outPath: String,
+        resolveFileName: (@Sendable (String, String) -> String)?,
         onReady: @escaping @Sendable (String, UInt16, [String: String]) -> Void,
         onPin: @escaping @Sendable (String) -> Void
     ) async throws -> PairedDeviceRecord {
@@ -2717,6 +2832,7 @@ extension IdeviceGateway {
                 hostName: hostName,
                 hostModel: hostModel,
                 outPath: outPath,
+                resolveFileName: resolveFileName,
                 onReady: onReady,
                 onPin: onPin
             )
@@ -2729,6 +2845,7 @@ extension IdeviceGateway {
         hostName: String,
         hostModel: String,
         outPath: String,
+        resolveFileName: (@Sendable (String, String) -> String)?,
         onRequestPin: @escaping @Sendable (@escaping @Sendable (String) -> Void) -> Void
     ) async throws -> PairedDeviceRecord {
         try await withFFIDispatch(on: self.ffiQueue) {
@@ -2739,6 +2856,7 @@ extension IdeviceGateway {
                 hostName: hostName,
                 hostModel: hostModel,
                 outPath: outPath,
+                resolveFileName: resolveFileName,
                 onRequestPin: onRequestPin
             )
         }

@@ -24,6 +24,7 @@ public struct PairedDeviceRecord: Sendable {
 }
 
 public protocol DeviceGatewayAPI: AnyObject, Sendable {
+    var requiresUsbmuxd: Bool { get }
     var supportsCoreDeviceTransport: Bool { get }
     var coreDeviceTransportEnabled: Bool { get }
     var hasActiveTransportBatch: Bool { get }
@@ -34,16 +35,16 @@ public protocol DeviceGatewayAPI: AnyObject, Sendable {
     var pairingFileData: Data? { get }
     var pairingDataDict: [String: any Sendable]? { get }
 
-    func getPort(for protocol: PairingProtocol) -> UInt16
-    func setPort(_ port: UInt16, for protocol: PairingProtocol)
+    func getPort(for protocolType: PairingProtocol) -> UInt16
+    func setPort(_ port: UInt16, for protocolType: PairingProtocol)
 
-    func start(pairingFileContent: String) async throws
+    func start(pairingFileContent: String, preferred: PairingProtocol?) async throws
+    func stop() async throws
     func setDeviceEndpointIp(_ ip: String?)
     func setLogging(_ enabled: Bool)
-    func getPairingFileType() -> PairingProtocol
 
-    func fetchUDID() async throws -> String?
-    func getLockdownValue(key: String) async throws -> String?
+    func fetchUDID() async throws -> String
+    func getLockdownValue(key: String) async throws -> String
 
     func isDDIMounted() async throws -> Bool
     func mountDeveloperImage(image: Data, signature: Data) async throws
@@ -68,6 +69,7 @@ public protocol DeviceGatewayAPI: AnyObject, Sendable {
         hostName: String,
         hostModel: String,
         outPath: String,
+        resolveFileName: (@Sendable (String, String) -> String)?,
         onReady: @escaping @Sendable (String, UInt16, [String: String]) -> Void,
         onPin: @escaping @Sendable (String) -> Void
     ) async throws -> PairedDeviceRecord
@@ -78,6 +80,7 @@ public protocol DeviceGatewayAPI: AnyObject, Sendable {
         hostName: String,
         hostModel: String,
         outPath: String,
+        resolveFileName: (@Sendable (String, String) -> String)?,
         onRequestPin: @escaping @Sendable (@escaping @Sendable (String) -> Void) -> Void
     ) async throws -> PairedDeviceRecord
 
@@ -93,6 +96,10 @@ public extension DeviceGatewayAPI {
     func configureCoreDeviceTransport(_ enabled: Bool) {}
     func beginTransportBatch() async {}
     func endTransportBatch() async {}
+    func start(pairingFileContent: String, preferred: PairingProtocol? = nil) async throws {
+        try await start(pairingFileContent: pairingFileContent, preferred: preferred)
+    }
+
     // Active service port for the currently loaded pairing file mode
     var servicePort: UInt16 {
         getPort(for: pairingFileType)

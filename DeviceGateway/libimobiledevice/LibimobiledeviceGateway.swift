@@ -11,7 +11,7 @@ import libimobiledevice
 import OpenSSL
 import RPPairing
 import DeviceGatewayAPI
-internal import MinimuxerCommon
+import MinimuxerCommon
 
 internal final class LibimobiledeviceGatewayError: DeviceGatewayError, @unchecked Sendable {
     override var errorDescription: String? {
@@ -72,8 +72,9 @@ public enum DeviceService: String, Sendable {
 private let kAfcChunkSize = 1024 * 1024 // 1 MB AFC bulk transfer chunk
 private let kDefaultTimeoutMs: Int32 = 120000
 
-public final class LibimobiledeviceGateway: BaseDeviceGateway, DeviceGatewayAPI {
+public final class LibimobiledeviceGateway: BaseDeviceGateway, DeviceGatewayAPI, @unchecked Sendable {
     public static let shared = LibimobiledeviceGateway()
+    public let requiresUsbmuxd: Bool = true
 
     private var cachedUDID: String? = nil
     private var rpIdentity: rppairing_identity_t? = nil
@@ -81,7 +82,7 @@ public final class LibimobiledeviceGateway: BaseDeviceGateway, DeviceGatewayAPI 
     private var activeTunnelInfo: rppairing_tunnel_info_t? = nil
     private var activeRsd: rppairing_rsd_t? = nil
 
-    private override init() {
+    public override init() {
         let sslOpts = UInt64(OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS | OPENSSL_INIT_ADD_ALL_CIPHERS | OPENSSL_INIT_ADD_ALL_DIGESTS)
         let sslRes = OpenSSLInitResult(code: OPENSSL_init_ssl(sslOpts, nil))
         let sslErrs = getOpenSSLErrors()
@@ -106,18 +107,22 @@ public final class LibimobiledeviceGateway: BaseDeviceGateway, DeviceGatewayAPI 
         cleanup()
     }
 
-    private func cleanup() {
+    public override func cleanup() {
         debugLog("[LibimobiledeviceGateway] cleanup() called")
-        setInitialized(false)
-        setPairingFileData(nil)
         self.cachedUDID = nil
-        setPairingFileType(.unknown)
-        cleanupRPTunnel()
         rpIdentity = nil
+        super.cleanup()
     }
 
     public override func invalidateConnection() {
         cleanupRPTunnel()
+    }
+
+    public override func stop() async throws {
+        try await withFFIDispatch {
+            self.cleanup()
+        }
+        try await super.stop()
     }
 
     public override func setLogging(_ enabled: Bool) {
@@ -367,11 +372,11 @@ public final class LibimobiledeviceGateway: BaseDeviceGateway, DeviceGatewayAPI 
         }
     }
 
-    func syncStart(pairingFileContent: String) throws {
+    func syncStart(pairingFileContent: String, preferred: PairingProtocol?) throws {
         debugLog("[LibimobiledeviceGateway] start() called")
         cleanup()
 
-        let pairingFile = try PairingFileParser.parse(content: pairingFileContent)
+        let pairingFile = try PairingFileParser.parse(content: pairingFileContent, preferred: preferred)
         setPairingFileData(pairingFile.rawData)
         setPairingFileType(pairingFile.mode)
 
@@ -397,10 +402,11 @@ public final class LibimobiledeviceGateway: BaseDeviceGateway, DeviceGatewayAPI 
         debugLog("[LibimobiledeviceGateway] Initialized successfully with \(pairingFile.mode.rawValue) pairing")
     }
 
-    func syncFetchUDID() throws -> String? {
+    func syncFetchUDID() throws -> String {
         try verifyInitialized()
         do {
-            if let hwUdid = try syncGetLockdownValue(key: "UniqueDeviceID"), !hwUdid.isEmpty {
+            let hwUdid = try syncGetLockdownValue(key: "UniqueDeviceID")
+            if !hwUdid.isEmpty {
                 debugLog("[LibimobiledeviceGateway] syncFetchUDID: retrieved hardware UDID: \(hwUdid)")
                 self.cachedUDID = hwUdid
                 return hwUdid
@@ -408,35 +414,44 @@ public final class LibimobiledeviceGateway: BaseDeviceGateway, DeviceGatewayAPI 
         } catch {
             debugLog("[LibimobiledeviceGateway] syncFetchUDID: failed to query lockdown: \(error)")
         }
-        return cachedUDID
+        if let cached = cachedUDID, !cached.isEmpty {
+            return cached
+        }
+        throw LibimobiledeviceGatewayError(.serviceError, reason: "UniqueDeviceID not found on device")
     }
 
-    func syncGetLockdownValue(key: String) throws -> String? {
+    func syncGetLockdownValue(key: String) throws -> String {
         if pairingFileType == .rppairing {
             return try withRSDService(.lockdownd) { stream in
                 try rsdSendPlist(stream, dict: ["Label": "SideStore", "Request": "GetValue", "Key": key])
                 let resp = try rsdRecvPlist(stream)
                 debugLog("[LibimobiledeviceGateway] syncGetLockdownValue(\(key)) response: \(resp)")
-                return resp["Value"] as? String
+                guard let val = resp["Value"] as? String else {
+                    debugLog("[LibimobiledeviceGateway] syncGetLockdownValue(\(key)) value_missing_or_invalid=true response_field_count=\(resp.count)")
+                    throw LibimobiledeviceGatewayError(.serviceError, reason: "Lockdown value for key '\(key)' is missing or invalid")
+                }
+                return val
             }
         }
 
-        return try withLockdown { (_, client) -> String? in
+        return try withLockdown { (_, client) -> String in
             var valNode: plist_t? = nil
             let err = lockdownd_get_value(client, nil, key, &valNode)
             guard err == LOCKDOWN_E_SUCCESS, let valNode = valNode else {
-                return nil
+                debugLog("[LibimobiledeviceGateway] syncGetLockdownValue(\(key)) lockdownd_get_value failed with code \(err.rawValue)")
+                throw LibimobiledeviceGatewayError(.serviceError, reason: "Failed to get lockdown value for key '\(key)': code \(err.rawValue)")
             }
             defer { plist_free(valNode) }
 
             var valPtr: UnsafeMutablePointer<CChar>? = nil
             plist_get_string_val(valNode, &valPtr)
-            if let valPtr = valPtr {
-                let val = String(cString: valPtr)
-                free(valPtr)
-                return val
+            guard let valPtr = valPtr else {
+                debugLog("[LibimobiledeviceGateway] syncGetLockdownValue(\(key)) plist string pointer is nil")
+                throw LibimobiledeviceGatewayError(.serviceError, reason: "Lockdown value for key '\(key)' could not be decoded as string")
             }
-            return nil
+            let val = String(cString: valPtr)
+            free(valPtr)
+            return val
         }
     }
 
@@ -673,6 +688,9 @@ public final class LibimobiledeviceGateway: BaseDeviceGateway, DeviceGatewayAPI 
     }
 
     func syncDumpProfiles(docsPath: String) throws -> String {
+        let path = docsPath.hasPrefix("file://") ? String(docsPath.dropFirst(7)) : docsPath
+        let dumpDir = path.hasSuffix("/Profiles") || path.hasSuffix("/Profiles/") ? path : "\(path)/Profiles"
+        try? FileManager.default.createDirectory(atPath: dumpDir, withIntermediateDirectories: true)
         if pairingFileType == .rppairing {
             return try withRSDService(.misagent) { stream in
                 try rsdSendPlist(stream, dict: ["MessageType": "CopyAll"])
@@ -681,10 +699,10 @@ public final class LibimobiledeviceGateway: BaseDeviceGateway, DeviceGatewayAPI 
                     return ""
                 }
                 for (idx, pData) in profiles.enumerated() {
-                    let path = (docsPath as NSString).appendingPathComponent("Profile_\(idx).mobileprovision")
-                    try? pData.write(to: URL(fileURLWithPath: path))
+                    let filePath = (dumpDir as NSString).appendingPathComponent("Profile_\(idx).mobileprovision")
+                    try? pData.write(to: URL(fileURLWithPath: filePath))
                 }
-                return "Successfully dumped \(profiles.count) profiles"
+                return dumpDir
             }
         }
 
@@ -1141,6 +1159,40 @@ public final class LibimobiledeviceGateway: BaseDeviceGateway, DeviceGatewayAPI 
         }
     }
 
+    @discardableResult
+    private func sendDebugserverCommand(client: debugserver_client_t, name: String, args: [String]) throws -> String? {
+        debugLog("[LibimobiledeviceGateway] sendDebugserverCommand() called argument_count=\(args.count)")
+        var command: debugserver_command_t? = nil
+        var argPtrs: [UnsafeMutablePointer<CChar>?] = args.map { strdup($0) }
+        defer {
+            for ptr in argPtrs {
+                if let ptr = ptr { free(ptr) }
+            }
+        }
+
+        let newErr = name.withCString { namePtr in
+            argPtrs.withUnsafeMutableBufferPointer { buf in
+                debugserver_command_new(namePtr, Int32(args.count), buf.baseAddress, &command)
+            }
+        }
+        guard newErr == DEBUGSERVER_E_SUCCESS, let cmd = command else {
+            throw LibimobiledeviceGatewayError(.serviceError, reason: "debugserver_command_new failed with code \(newErr.rawValue)")
+        }
+        defer { debugserver_command_free(cmd) }
+
+        var response: UnsafeMutablePointer<CChar>? = nil
+        let sendErr = debugserver_client_send_command(client, cmd, &response, nil)
+        guard sendErr == DEBUGSERVER_E_SUCCESS else {
+            throw LibimobiledeviceGatewayError(.serviceError, reason: "debugserver_client_send_command failed with code \(sendErr.rawValue)")
+        }
+        if let response = response {
+            let respStr = String(cString: response)
+            free(response)
+            return respStr
+        }
+        return nil
+    }
+
     func syncDebugApp(appId: String) throws {
         if pairingFileType == .rppairing {
             try withRSDService(.debugserver) { stream in
@@ -1154,7 +1206,25 @@ public final class LibimobiledeviceGateway: BaseDeviceGateway, DeviceGatewayAPI 
             create: debugserver_client_new,
             cleanup: debugserver_client_free
         ) { ds in
-            debugLog("[LibimobiledeviceGateway] debugApp connected to debugserver for \(appId)")
+            guard let pid = try self.findProcessPID(
+                appId: appId,
+                sendCommand: { name, args in
+                    try self.sendDebugserverCommand(client: ds, name: name, args: args)
+                }
+            ) else {
+                throw LibimobiledeviceGatewayError(
+                    .serviceError,
+                    reason: "App '\(appId)' is not running. Please open the app and keep it in the background, then enable JIT."
+                )
+            }
+            if pid > 0 {
+                debugLog("[LibimobiledeviceGateway] Attaching for JIT pid_present=\(pid > 0)")
+                let commands = [("vAttach;\(String(format: "%x", pid))", [String]()), ("D", [String]())]
+                for (name, args) in commands {
+                    try self.sendDebugserverCommand(client: ds, name: name, args: args)
+                }
+            }
+            debugLog("[LibimobiledeviceGateway] debugApp attached and detached pid_present=\(pid > 0)")
         }
     }
 
@@ -1171,7 +1241,10 @@ public final class LibimobiledeviceGateway: BaseDeviceGateway, DeviceGatewayAPI 
             create: debugserver_client_new,
             cleanup: debugserver_client_free
         ) { ds in
-            debugLog("[LibimobiledeviceGateway] debugProcess connected to debugserver for PID \(pid)")
+            let commands = [("vAttach;\(String(format: "%x", pid))", [String]()), ("D", [String]())]
+            for (name, args) in commands {
+                try self.sendDebugserverCommand(client: ds, name: name, args: args)
+            }
         }
     }
 
@@ -1325,19 +1398,19 @@ public final class LibimobiledeviceGateway: BaseDeviceGateway, DeviceGatewayAPI 
 
 // Async FFI Dispatcher Extensions
 extension LibimobiledeviceGateway {
-    public func start(pairingFileContent: String) async throws {
+    public func start(pairingFileContent: String, preferred: PairingProtocol?) async throws {
         try await withFFIDispatch {
-            try self.syncStart(pairingFileContent: pairingFileContent)
+            try self.syncStart(pairingFileContent: pairingFileContent, preferred: preferred)
         }
     }
 
-    public func fetchUDID() async throws -> String? {
+    public func fetchUDID() async throws -> String {
         try await withFFIDispatch {
             try self.syncFetchUDID()
         }
     }
 
-    public func getLockdownValue(key: String) async throws -> String? {
+    public func getLockdownValue(key: String) async throws -> String {
         try await withFFIDispatch {
             try self.syncGetLockdownValue(key: key)
         }
@@ -1433,6 +1506,7 @@ extension LibimobiledeviceGateway {
         hostName: String,
         hostModel: String,
         outPath: String,
+        resolveFileName: (@Sendable (String, String) -> String)?,
         onReady: @escaping @Sendable (String, UInt16, [String: String]) -> Void,
         onPin: @escaping @Sendable (String) -> Void
     ) async throws -> PairedDeviceRecord {
@@ -1445,6 +1519,7 @@ extension LibimobiledeviceGateway {
         hostName: String,
         hostModel: String,
         outPath: String,
+        resolveFileName: (@Sendable (String, String) -> String)?,
         onRequestPin: @escaping @Sendable (@escaping @Sendable (String) -> Void) -> Void
     ) async throws -> PairedDeviceRecord {
         throw LibimobiledeviceGatewayError(.unsupportedOperation, reason: "triggerWirelessPair (RemotePairing is not supported on pure Lockdown gateway)")

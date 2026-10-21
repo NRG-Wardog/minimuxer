@@ -7,8 +7,8 @@
 //
 
 import Foundation
+import DeviceGatewayAPI
 public import MinimuxerCommon
-public import DeviceGatewayAPI
 
 public struct MinimuxerServiceError: Error, CustomStringConvertible {
     public let component: MinimuxerComponent
@@ -41,6 +41,7 @@ public enum MinimuxerError: Error, Equatable, CustomStringConvertible, Localized
     case createProcessControl(String)
 
     case getLockdownValue(String)
+    case fetchUDID(String)
     case connect(String)
     case close(String)
     case xpcHandshake(String)
@@ -91,6 +92,7 @@ public enum MinimuxerError: Error, Equatable, CustomStringConvertible, Localized
         case .createRemoteServer(let r): return "CreateRemoteServer: \(r)"
         case .createProcessControl(let r): return "CreateProcessControl: \(r)"
         case .getLockdownValue(let r): return "GetLockdownValue: \(r)"
+        case .fetchUDID(let r): return "FetchUDID: \(r)"
         case .connect(let r): return "Connect: \(r)"
         case .close(let r): return "Close: \(r)"
         case .xpcHandshake(let r): return "XpcHandshake: \(r)"
@@ -123,5 +125,30 @@ public enum MinimuxerError: Error, Equatable, CustomStringConvertible, Localized
 
     public var errorDescription: String? {
         return self.description
+    }
+}
+
+extension DeviceGatewayError {
+    var isVPNDrop: Bool {
+        guard code == .connectionFailed || code == .serviceError else { return false }
+        let lower = reason.lowercased()
+        return lower.contains("broken pipe")        || lower.contains("brokenpipe")         ||
+               lower.contains("connection reset")   || lower.contains("connectionreset")    ||
+               lower.contains("early eof")          || lower.contains("unexpectedeof")      ||
+               lower.contains("no route to host")   || lower.contains("connection refused")
+    }
+
+    var isRetryable: Bool {
+        (code == .connectionFailed || code == .noConnection) && !isVPNDrop
+    }
+
+    func asMinimuxerError(protocol activeProtocol: PairingProtocol, catchAll: (String) -> MinimuxerError) -> MinimuxerError {
+        if code == .invalidPairingFile {
+            return .invalidPairing(protocol: activeProtocol, reason: reason)
+        }
+        if isVPNDrop {
+            return .invalidVPN(reason)
+        }
+        return catchAll(reason)
     }
 }

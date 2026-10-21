@@ -36,7 +36,7 @@ open class BaseDeviceGateway: @unchecked Sendable {
     public package(set) var isInitialized: Bool = false
     private var protocolPorts: [PairingProtocol: UInt16] = [:]
 
-    package init() throws {
+    public init() throws {
         if Self.self === BaseDeviceGateway.self {
             throw AbstractClassError.abstractInitializerInvoked
         }
@@ -54,22 +54,18 @@ open class BaseDeviceGateway: @unchecked Sendable {
         self.isInitialized = initialized
     }
 
-    public func getPairingFileType() -> PairingProtocol {
-        pairingFileType
-    }
-
-    public func getPort(for protocol: PairingProtocol) -> UInt16 {
-        protocolPorts[`protocol`] ?? `protocol`.defaultPort
+    public func getPort(for protocolType: PairingProtocol) -> UInt16 {
+        protocolPorts[protocolType] ?? protocolType.defaultPort
     }
 
     private var logTag: String {
         String(describing: type(of: self))
     }
 
-    open func setPort(_ port: UInt16, for protocol: PairingProtocol) {
-        debugLog("[\(logTag)] setPort(\(port), for: .\(`protocol`)) called")
-        guard protocolPorts[`protocol`] != port else { return }
-        protocolPorts[`protocol`] = port
+    open func setPort(_ port: UInt16, for protocolType: PairingProtocol) {
+        guard protocolPorts[protocolType] != port else { return }
+        debugLog("[\(logTag)] setPort(\(port), for: .\(protocolType)) called")
+        protocolPorts[protocolType] = port
         invalidateConnection()
     }
 
@@ -90,5 +86,217 @@ open class BaseDeviceGateway: @unchecked Sendable {
 
     open func invalidateConnection() {
         // Subclasses override to invalidate cached handles/tunnels
+    }
+
+    open func cleanup() {
+        setInitialized(false)
+        setPairingFileData(nil)
+        setPairingFileType(.unknown)
+        invalidateConnection()
+    }
+
+    open func stop() async throws {
+        cleanup()
+    }
+}
+
+
+public struct RSPStopReply: Codable, Sendable {
+    public let rawPacket: String
+    public let signal: UInt8?
+    public let threadId: String?
+    public let registers: [String: String]
+    public let metadata: [String: String]
+
+    public init?(rawPacket: String) {
+        guard rawPacket.hasPrefix("T") else { return nil }
+        self.rawPacket = rawPacket
+
+        let hexSig = rawPacket.dropFirst().prefix(2)
+        self.signal = UInt8(hexSig, radix: 16)
+
+        var parsedThreadId: String?
+        var parsedRegs: [String: String] = [:]
+        var parsedMeta: [String: String] = [:]
+
+        let body = rawPacket.dropFirst(1 + hexSig.count)
+        let pairs = body.split(separator: ";")
+        for pair in pairs {
+            let parts = pair.split(separator: ":", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            let key = String(parts[0])
+            let val = String(parts[1])
+
+            if key == "thread" {
+                parsedThreadId = val
+            } else if key.allSatisfy({ $0.isHexDigit }) || ["pc", "sp", "fp", "lr", "cpsr"].contains(key) {
+                parsedRegs[key] = val
+            } else {
+                parsedMeta[key] = val
+            }
+        }
+
+        self.threadId = parsedThreadId
+        self.registers = parsedRegs
+        self.metadata = parsedMeta
+    }
+
+    public var jsonPrettyPrinted: String? {
+        guard let data = try? JSONEncoder().encode(self),
+              let obj = try? JSONSerialization.jsonObject(with: data),
+              let prettyData = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) else {
+            return nil
+        }
+        return String(data: prettyData, encoding: .utf8)
+    }
+}
+
+public struct RSPProcessInfo: Sendable, Equatable, Hashable {
+    public let pid: UInt32
+    public let name: String
+    public let executable: String
+
+    public init?(rawResponse: String) {
+        guard !rawResponse.isEmpty, !rawResponse.hasPrefix("E") else { return nil }
+
+        var parsedPid: UInt32?
+        var parsedName = ""
+        var parsedExecutable = ""
+
+        let pairs = rawResponse.split(separator: ";")
+        for pair in pairs {
+            let parts = pair.split(separator: ":", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            let key = parts[0].trimmingCharacters(in: .whitespaces)
+            let val = String(parts[1]).trimmingCharacters(in: .whitespaces)
+
+            switch key {
+            case "pid":
+                parsedPid = UInt32(val, radix: 16) ?? UInt32(val)
+            case "name":
+                parsedName = BaseDeviceGateway.decodeHexASCII(val) ?? val
+            case "executable":
+                parsedExecutable = BaseDeviceGateway.decodeHexASCII(val) ?? val
+            default:
+                break
+            }
+        }
+
+        guard let pid = parsedPid else { return nil }
+        self.pid = pid
+        self.name = parsedName
+        self.executable = parsedExecutable
+    }
+
+    public func matches(term: String) -> Bool {
+        name.localizedCaseInsensitiveContains(term) ||
+        (!executable.isEmpty && executable.localizedCaseInsensitiveContains(term))
+    }
+}
+
+extension BaseDeviceGateway { 
+
+    public static func stringToHex(_ str: String) -> String {
+        str.utf8.map { String(format: "%02x", $0) }.joined()
+    }
+
+    public static func decodeHexASCII(_ hex: String) -> String? {
+        let utf8 = hex.utf8
+        guard utf8.count % 2 == 0 else { return nil }
+        var data = Data(capacity: utf8.count / 2)
+        var byte: UInt8 = 0
+
+        for (index, char) in utf8.enumerated() {
+            let val: UInt8
+            switch char {
+            case 48...57:  val = char - 48       // '0'...'9'
+            case 65...70:  val = char - 65 + 10  // 'A'...'F'
+            case 97...102: val = char - 97 + 10  // 'a'...'f'
+            default: return nil
+            }
+
+            if index.isMultiple(of: 2) {
+                byte = val << 4
+            } else {
+                data.append(byte | val)
+            }
+        }
+        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .ascii)
+    }
+
+    open func findProcessPID(
+        appId: String,
+        bundlePath: String? = nil,
+        executableName: String? = nil,
+        sendCommand: (String, [String]) throws -> String?
+    ) throws -> UInt32? {
+        debugLog("[\(logTag)] findProcessPID() searching has_bundle_path=\(bundlePath != nil) has_executable_name=\(executableName != nil)")
+
+        var targetTerms: [String] = []
+
+        if let executableName, !executableName.isEmpty {
+            targetTerms.append(executableName)
+        }
+
+        if let bundlePath, !bundlePath.isEmpty {
+            let lastComponent = URL(fileURLWithPath: bundlePath).deletingPathExtension().lastPathComponent
+            if !lastComponent.isEmpty && lastComponent != "App" && !targetTerms.contains(lastComponent) {
+                targetTerms.append(lastComponent)
+            }
+        }
+
+        let components = appId.split(whereSeparator: { $0 == "." || $0 == "-" || $0 == "_" })
+        for comp in components {
+            let str = String(comp)
+            if ["com", "org", "net", "io", "app", "ios"].contains(str.lowercased()) { continue }
+            if str.count == 10 && str.allSatisfy({ $0.isLetter || $0.isNumber }) && str.uppercased() == str {
+                continue
+            }
+            let stripped = str.trimmingCharacters(in: .decimalDigits)
+            if !stripped.isEmpty && stripped != str && !targetTerms.contains(stripped) {
+                targetTerms.append(stripped)
+            }
+            if !targetTerms.contains(str) {
+                targetTerms.append(str)
+            }
+        }
+
+        let dotComponents = appId.split(separator: ".")
+        if dotComponents.count > 1 {
+            let withoutSuffix = dotComponents.dropLast().joined(separator: ".")
+            if !withoutSuffix.isEmpty && !targetTerms.contains(withoutSuffix) {
+                targetTerms.append(withoutSuffix)
+            }
+        }
+
+        if !targetTerms.contains(appId) {
+            targetTerms.append(appId)
+        }
+
+        verboseLog("[\(logTag)] findProcessPID() target_term_count=\(targetTerms.count)")
+
+        // Direct attach via RSP vAttachName
+        for term in targetTerms {
+            let hex = Self.stringToHex(term)
+            let attachCmd = "vAttachName;\(hex)"
+            debugLog("[\(logTag)] findProcessPID() trying direct attach")
+
+            guard let attachResp = try? sendCommand(attachCmd, []),
+                  !attachResp.isEmpty,
+                  !attachResp.hasPrefix("E")
+            else {
+                continue
+            }
+
+            debugLog("[\(logTag)] findProcessPID() direct attach succeeded response_bytes=\(attachResp.utf8.count)")
+            if let stopReply = RSPStopReply(rawPacket: attachResp) {
+                debugLog("[\(logTag)] direct attach stop reply decoded signal_present=\(stopReply.signal != nil) register_count=\(stopReply.registers.count)")
+            }
+            _ = try? sendCommand("D", [])
+            return 0
+        }
+
+        debugLog("[\(logTag)] findProcessPID() no running process found")
+        return nil
     }
 }

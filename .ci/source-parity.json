@@ -1,125 +1,198 @@
 {
   "owner": "minimuxer",
-  "upstream_base": "98c3c79982f813878e922ab42f9545314a700f0c",
-  "fork_commit": "eefd74adbda3462fbd5db9857c5f233db8601860",
-  "branch": "migration/runtime-source-141776ba",
-  "behavior_differences": [],
+  "upstream_base": "12be70dc2627307a16bfd2dc7a009080d5bec909",
+  "previous_fork_commit": "efbcab05d7d636aa37c6bf6c7f364d122c5610f6",
+  "upstream_sync": {
+    "from_base": "98c3c79982f813878e922ab42f9545314a700f0c",
+    "source_pin_change_required": true,
+    "new_native_upstream": "3e55c8486b2057e40c1f74aaaa1155c82341cf76",
+    "jktcp_pin": "32c0210f286b4fd16efe05be4f57167a9d94459b",
+    "candidate_commit_status": "pending_root_owned_two_parent_commit",
+    "required_commit_parents": [
+      "efbcab05d7d636aa37c6bf6c7f364d122c5610f6",
+      "12be70dc2627307a16bfd2dc7a009080d5bec909"
+    ],
+    "merge_base": "98c3c79982f813878e922ab42f9545314a700f0c",
+    "previous_frozen_manifest_sha256": "86d843d1465ca11c15c8da846a387c3d0b290a194e27524b36b50a476731062c",
+    "verifier_sha256": "6aa1ba176b52552589e648aca7a95c027269ec69d6a0dbe3d0fadac5c229ad98"
+  },
+  "behavior_differences": [
+    "Retain NRG Lockdown-first default for composite records while honoring explicit preferred protocol.",
+    "Preserve fail-closed, live-UDID CoreDevice selection, scoped cleanup, staged signed-bundle identity and diagnostics.",
+    "Apply the newest runtime backend and remote-pairing port atomically only after all active NRG transport batch callbacks end; preserve initialized gateways for port-only changes.",
+    "Retain fake-usbmuxd requirement for legacy Lockdown debugserver but never use its metadata as live UDID proof.",
+    "Keep local source-built IDevice framework wiring and strict frozen-source verifier.",
+    "Redact introduced identity/payload/provider-error diagnostics and preserve the existing native verbosity ceiling."
+  ],
   "files": [
     {
-      "path": "Common/PairingFile.swift",
-      "upstream_sha256": "981e421a46f3991ac4472edba1ace965763da6804be29f9d3697a25346fbad8e",
-      "old_generated_sha256": "0f82090b2f0306264dd1a01bd6eb8dc79a4080015ec188227ab27d6c83de9bea",
-      "new_source_sha256": "0f82090b2f0306264dd1a01bd6eb8dc79a4080015ec188227ab27d6c83de9bea",
+      "path": ".ci/upstream-sync-smoke.swift",
+      "upstream_sha256": null,
+      "previous_fork_sha256": null,
+      "new_source_sha256": "ea8b295db77871c7c34f38d763dc51848c3f9f398f74564be231d3189cce7890",
       "mode": "0o644",
-      "subsystem": "Maintain Lockdown first composite pairing",
-      "commit": "99afb1fd9dc94862a4b98aabaee05d9b93382dfe",
-      "git_mode": "100644"
+      "git_mode": "100644",
+      "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
+    },
+    {
+      "path": ".ci/verify-upstream-sync.py",
+      "upstream_sha256": null,
+      "previous_fork_sha256": null,
+      "new_source_sha256": "3d3a5b7315eb9f6a99cf24259fd135fa37b7ff6d1d92ce850875648b78bae89c",
+      "mode": "0o644",
+      "git_mode": "100644",
+      "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
+    },
+    {
+      "path": "Common/PairingFile.swift",
+      "upstream_sha256": "3b068da97988c86ff6a239b3d3f4e601d95d9c6b55c2a5ead2a40aef21618b69",
+      "previous_fork_sha256": "0f82090b2f0306264dd1a01bd6eb8dc79a4080015ec188227ab27d6c83de9bea",
+      "new_source_sha256": "16ae51de40d34d97db2600caf4aba3a9c7aff81096398089e747b2811fc6e511",
+      "mode": "0o644",
+      "git_mode": "100644",
+      "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
     },
     {
       "path": "DeviceGateway/BaseDeviceGateway.swift",
-      "upstream_sha256": "fbd99d75b4241352ce67144381cb3e4095ebaea55e517dad3d24570008a5a241",
-      "old_generated_sha256": "31f763a008ee1715437c238b4126da7669e0ecfdc757fca6f1250234021420eb",
-      "new_source_sha256": "31f763a008ee1715437c238b4126da7669e0ecfdc757fca6f1250234021420eb",
+      "upstream_sha256": "55df627fc883986a173d30c650cc5856bf3487de6a9f188a1b024291818ebee3",
+      "previous_fork_sha256": "31f763a008ee1715437c238b4126da7669e0ecfdc757fca6f1250234021420eb",
+      "new_source_sha256": "7f4c51a8c068748a8441d7a60d6629bb84e4de773a3b1849b84f16a826f87989",
       "mode": "0o644",
-      "subsystem": "Maintain operation scoped CoreDevice transport and gateway readiness",
-      "commit": "9a5ff8405049e0308f4ad4446c4540c91d85f591",
-      "git_mode": "100644"
+      "git_mode": "100644",
+      "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
     },
     {
       "path": "DeviceGateway/DeviceGatewayAPI.swift",
-      "upstream_sha256": "f1910508b32e5dcac2547f3a4cd858a94f659913de185706f800fe0f02b0d3e0",
-      "old_generated_sha256": "4c4f6dffb21f4cd2de1372a49e939ad04761ed445a85906e3add7b69abc19645",
-      "new_source_sha256": "4c4f6dffb21f4cd2de1372a49e939ad04761ed445a85906e3add7b69abc19645",
+      "upstream_sha256": "678d7a7f6c1483ef50a724f810be7ce6bf2e923235d503210614abc929526c04",
+      "previous_fork_sha256": "4c4f6dffb21f4cd2de1372a49e939ad04761ed445a85906e3add7b69abc19645",
+      "new_source_sha256": "bded5537d477c30e5aa6999a48527c99e0f638f6bd1267fb2fa4d17ea6fdfd4b",
       "mode": "0o644",
-      "subsystem": "Maintain operation scoped CoreDevice transport and gateway readiness",
-      "commit": "9a5ff8405049e0308f4ad4446c4540c91d85f591",
-      "git_mode": "100644"
+      "git_mode": "100644",
+      "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
+    },
+    {
+      "path": "DeviceGateway/Package.swift",
+      "upstream_sha256": "574aa20bd89e739a07483c704ffdb845147715f0066d8c4c524b520ff904c85f",
+      "previous_fork_sha256": "ecb4a9cbd63f68b1b4dd321c300c28148e996c91b149857d558f2d2a02b0e0ed",
+      "new_source_sha256": "ecb4a9cbd63f68b1b4dd321c300c28148e996c91b149857d558f2d2a02b0e0ed",
+      "mode": "0o644",
+      "git_mode": "100644",
+      "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
     },
     {
       "path": "DeviceGateway/idevice/IdeviceGateway.swift",
-      "upstream_sha256": "043816f4249edb315cada4e056285a633ed4eabf46b14733a1a62dc378dbfda6",
-      "old_generated_sha256": "416ff9a0ec1e32382c2e55eaebba7956188d1e90a01a43f5cdb53a3348de4ead",
-      "new_source_sha256": "416ff9a0ec1e32382c2e55eaebba7956188d1e90a01a43f5cdb53a3348de4ead",
+      "upstream_sha256": "812ea4d876c09a05e17a8ef2581915678508e0622a527d37d7f85cb248e457e8",
+      "previous_fork_sha256": "416ff9a0ec1e32382c2e55eaebba7956188d1e90a01a43f5cdb53a3348de4ead",
+      "new_source_sha256": "af0dd4c10cc613ac718e7374acc4ae2cfa056d3c3edcf459eecca8a3a2d1498a",
       "mode": "0o644",
-      "subsystem": "Maintain operation scoped CoreDevice transport and gateway readiness",
-      "commit": "9a5ff8405049e0308f4ad4446c4540c91d85f591",
-      "git_mode": "100644"
+      "git_mode": "100644",
+      "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
+    },
+    {
+      "path": "DeviceGateway/libimobiledevice/LibimobiledeviceGateway.swift",
+      "upstream_sha256": "32964c92c48c8f6e5b115edee1afa109606c9221c0ab5381f9e3c3bd54f4aef1",
+      "previous_fork_sha256": "8ff7eb09cc767d49483db8b54b906922403e85ee1dd1bfd4cef23c790e889a21",
+      "new_source_sha256": "e6d888ccc512b9a02e1848ad62e547290d0502978849eda47d9aca6d427f9184",
+      "mode": "0o644",
+      "git_mode": "100644",
+      "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
+    },
+    {
+      "path": "Sources/DeviceProvider.swift",
+      "upstream_sha256": "631b031f6e7e81556e9575def5823bb20ff2b7bff8f1a55828fc6814237ff971",
+      "previous_fork_sha256": null,
+      "new_source_sha256": "d2dac82d40c9499ed6ce62b1ffa2048e5d3e7ef0e52e3e1f64e45636d6d384d9",
+      "mode": "0o644",
+      "git_mode": "100644",
+      "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
+    },
+    {
+      "path": "Sources/EMProxyImpl.swift",
+      "upstream_sha256": "45ca3a2d78961169c8042832cd1b086b1b1c718e6b823230cd8b7c68ad77e22b",
+      "previous_fork_sha256": "644c23517db469ca2ba33760e802efa4fb1457a60ae826c82a872ffa5cc9432b",
+      "new_source_sha256": "e78a609916ccec99e154b402f0fbdb225c09bcb8a4d51c23aaa8df80d519c12c",
+      "mode": "0o644",
+      "git_mode": "100644",
+      "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
     },
     {
       "path": "Sources/MinimuxerApi.swift",
-      "upstream_sha256": "5509f75dd03e59926828782a7a863ee9f2f6407add80c237b22a7e96dc211d11",
-      "old_generated_sha256": "be369cf30192086e0926fa40666ef1e99d22aeaf5c35dee8f8e327365f45fc9c",
-      "new_source_sha256": "be369cf30192086e0926fa40666ef1e99d22aeaf5c35dee8f8e327365f45fc9c",
+      "upstream_sha256": "e643d5f3533fe3515ddaf736c015aecfd4ff8209c3df4d7e0b6fc51105857434",
+      "previous_fork_sha256": "be369cf30192086e0926fa40666ef1e99d22aeaf5c35dee8f8e327365f45fc9c",
+      "new_source_sha256": "c71230e058f6d80539796a8a6984148ac6b19dcd20ba543a6c04def83a0049d3",
       "mode": "0o644",
-      "subsystem": "Maintain operation scoped CoreDevice transport and gateway readiness",
-      "commit": "9a5ff8405049e0308f4ad4446c4540c91d85f591",
-      "git_mode": "100644"
+      "git_mode": "100644",
+      "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
     },
     {
       "path": "Sources/MinimuxerImpl.swift",
-      "upstream_sha256": "d232742205f5261e5763e66527103c6437fc38c214b561a366fd542bfccc4036",
-      "old_generated_sha256": "530f091ef950a611eaf9eebe86e86aef04ee9df98152fe20610c3534ebce678e",
-      "new_source_sha256": "530f091ef950a611eaf9eebe86e86aef04ee9df98152fe20610c3534ebce678e",
+      "upstream_sha256": "50cf0d90c1288573e94258a39c1f99e5342ab52ec68a73a6f88d3154fc4a3762",
+      "previous_fork_sha256": "530f091ef950a611eaf9eebe86e86aef04ee9df98152fe20610c3534ebce678e",
+      "new_source_sha256": "3d5cab382c0bb262110b767a925222c4beaec6748766dd8b3168ed61fa7fec55",
       "mode": "0o644",
-      "subsystem": "Maintain operation scoped CoreDevice transport and gateway readiness",
-      "commit": "9a5ff8405049e0308f4ad4446c4540c91d85f591",
-      "git_mode": "100644"
+      "git_mode": "100644",
+      "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
     },
     {
       "path": "Sources/RefreshTransportPolicy.swift",
       "upstream_sha256": null,
-      "old_generated_sha256": "1ddc3d112d8a218db2c8017947595782fbe625dcdf7fef1fc6d4495f8b8b15d0",
+      "previous_fork_sha256": "1ddc3d112d8a218db2c8017947595782fbe625dcdf7fef1fc6d4495f8b8b15d0",
       "new_source_sha256": "1ddc3d112d8a218db2c8017947595782fbe625dcdf7fef1fc6d4495f8b8b15d0",
       "mode": "0o644",
-      "subsystem": "Maintain operation scoped CoreDevice transport and gateway readiness",
-      "commit": "9a5ff8405049e0308f4ad4446c4540c91d85f591",
-      "git_mode": "100644"
+      "git_mode": "100644",
+      "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
+    },
+    {
+      "path": "Sources/Services/DeviceConnectionManager.swift",
+      "upstream_sha256": "2b39cf43a2bc73ccab1bcb979beb343ae6423ba45b060d77b41da87f3161f899",
+      "previous_fork_sha256": "8153f12477815d05667472738628e199187a660b2c712dde95ebdcd3e56f267c",
+      "new_source_sha256": "2d0d394bc33994966f8c9530e15bfd66e6c240d95c87ed878098122a4853dee7",
+      "mode": "0o644",
+      "git_mode": "100644",
+      "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
     },
     {
       "path": "Sources/Services/HeartbeatService.swift",
-      "upstream_sha256": "0fd6951869c7a7470cc915eb7698a4544d2316296ff2efcf6b2224cc12283149",
-      "old_generated_sha256": "cffed2b09e8f09e428f511c51204b8b1f2335e0669efa314a9fade8f3c06c48f",
-      "new_source_sha256": "cffed2b09e8f09e428f511c51204b8b1f2335e0669efa314a9fade8f3c06c48f",
+      "upstream_sha256": "50fc679ff9125e21797f03edb40f3913f558b7d208771a0cb5999b5029ddcbe1",
+      "previous_fork_sha256": "cffed2b09e8f09e428f511c51204b8b1f2335e0669efa314a9fade8f3c06c48f",
+      "new_source_sha256": "38e5a03c9026bb868c85911fc443c2a05407b207b4f76c90f5a5f400cb7c06d5",
       "mode": "0o644",
-      "subsystem": "Maintain operation scoped CoreDevice transport and gateway readiness",
-      "commit": "9a5ff8405049e0308f4ad4446c4540c91d85f591",
-      "git_mode": "100644"
+      "git_mode": "100644",
+      "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
+    },
+    {
+      "path": "Sources/Services/Mounter.swift",
+      "upstream_sha256": "8581341f6057bf90c65069b47be745c894bbde75ad682da0711db4cc8d3801ff",
+      "previous_fork_sha256": "2678949a145aa545319a551cbd36c2755590f5d793201141abab9b5a16a506d1",
+      "new_source_sha256": "2a1b30bb71ff255eb474d97df4e4effb98e7d67d6c4434b93ee142ca8ebb77c5",
+      "mode": "0o644",
+      "git_mode": "100644",
+      "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
     },
     {
       "path": "Sources/Services/NetworkObserverService.swift",
       "upstream_sha256": "9ea0adb9227664cb24e9c6e76b203eb66dc9275271e4b3d46946bd72956fdd11",
-      "old_generated_sha256": "0a2af148e244000577fb2a252cf4ae311a631e19f77ef9d4fbe83b34dce21f9e",
+      "previous_fork_sha256": "0a2af148e244000577fb2a252cf4ae311a631e19f77ef9d4fbe83b34dce21f9e",
       "new_source_sha256": "0a2af148e244000577fb2a252cf4ae311a631e19f77ef9d4fbe83b34dce21f9e",
       "mode": "0o644",
-      "subsystem": "Maintain operation scoped CoreDevice transport and gateway readiness",
-      "commit": "9a5ff8405049e0308f4ad4446c4540c91d85f591",
-      "git_mode": "100644"
-    },
-    {
-      "path": "DeviceGateway/Package.swift",
-      "upstream_sha256": "5a1224f1b7458b513ee5ae97bee08f4b102a06f195ab83e4cad6c417c08ff02f",
-      "old_generated_sha256": "ecb4a9cbd63f68b1b4dd321c300c28148e996c91b149857d558f2d2a02b0e0ed",
-      "new_source_sha256": "ecb4a9cbd63f68b1b4dd321c300c28148e996c91b149857d558f2d2a02b0e0ed",
-      "mode": "0o644",
-      "subsystem": "Maintain local built idevice package wiring",
-      "commit": "0405d93aa05979e32037be6be87e13ac229ce5e8",
-      "git_mode": "100644"
+      "git_mode": "100644",
+      "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
     }
   ],
-  "prepared_evidence_excluded": [
-    ".combined-errors.sha256"
+  "metadata_files": [
+    ".ci/source-parity.json",
+    ".ci/source-parity.py",
+    "NOTICE-NRG-Wardog"
   ],
   "tests_run": [
-    "git diff --check",
-    "exact changed source byte and mode comparison"
+    "Source invariants for synchronized APIs, custom native calls, scoped serialization and fail-closed readiness",
+    "git diff --no-index --check against upstream source (passed)"
   ],
   "tests_not_run": [
-    "Swift/Xcode build"
+    "Swift fake smoke harness (Swift compiler unavailable)",
+    "Swift/Xcode app build",
+    "Native backend or device execution",
+    "App authentication"
   ],
-  "source_parity_status": "exact_prepared_bytes_pass",
-  "metadata_files": [
-    "NOTICE-NRG-Wardog",
-    ".ci/source-parity.py",
-    ".ci/source-parity.json"
-  ]
+  "source_parity_status": "reviewed_sync_manifest_applied_pending_committed_parity_validation"
 }

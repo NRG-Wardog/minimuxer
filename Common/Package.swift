@@ -23,8 +23,10 @@ let package = Package(
                 "MinimuxerCommonLogging.swift",
                 "MinimuxerConstants.swift",
                 "NetworkUtils.swift",
+                "ConcurrencyUtils.swift",
                 "PairingFile.swift",
-                "PairingProtocol.swift"
+                "PairingProtocol.swift",
+                "TCPAcceptor.swift"
             ]
         )
     ]

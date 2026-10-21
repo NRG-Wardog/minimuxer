@@ -8,6 +8,7 @@
 
 import Foundation
 import Combine
+import ZIPFoundation
 internal import DeviceGatewayAPI
 internal import MinimuxerCommon
 
@@ -21,7 +22,10 @@ final internal class MinimuxerImpl: MinimuxerAPI {
         statusSubject.eraseToAnyPublisher()
     }
 
-    let gateway: any DeviceGatewayAPI
+    let deviceProvider: DeviceProvider
+    var gateway: any DeviceGatewayAPI {
+        deviceProvider.gateway
+    }
     let network: NetworkObserverService
     let emproxy: any EMProxyAPI
     let wirelessPair: any WirelessPairAPI
@@ -30,9 +34,13 @@ final internal class MinimuxerImpl: MinimuxerAPI {
     let endpoint: DeviceEndpoint
     let connectionManager: DeviceConnectionManager
     let heartbeat: HeartbeatService
+    
+    var activeProtocol: PairingProtocol {
+        gateway.pairingFileType
+    }
 
     init(
-        gateway: any DeviceGatewayAPI,
+        deviceProvider: DeviceProvider,
         network: NetworkObserverService,
         emproxy: any EMProxyAPI,
         wirelessPair: any WirelessPairAPI,
@@ -42,7 +50,7 @@ final internal class MinimuxerImpl: MinimuxerAPI {
         connectionManager: DeviceConnectionManager,
         heartbeat: HeartbeatService
     ) {
-        self.gateway = gateway
+        self.deviceProvider = deviceProvider
         self.network = network
         self.emproxy = emproxy
         self.wirelessPair = wirelessPair
@@ -64,6 +72,7 @@ final internal class MinimuxerImpl: MinimuxerAPI {
         var status: MinimuxerStatus = .stopped
         var mountTask: Task<Bool, Error>? = nil
         var lastDocsPath: String? = nil
+        var preferredProtocol: PairingProtocol? = nil
         
         func with<T>(_ body: (isolated State) throws -> T) rethrows -> T {
             try body(self)
@@ -76,11 +85,7 @@ final internal class MinimuxerImpl: MinimuxerAPI {
     var isLoggingEnabled: Bool { MinimuxerLogging.isLoggingEnabled }
     
     var isPairingFileLoaded: Bool {
-        return getPairingFileType() != .unknown
-    }
-    
-    func getPairingFileType() -> PairingProtocol {
-        return self.gateway.getPairingFileType()
+        return pairingFileType != .unknown
     }
 
 
@@ -98,23 +103,6 @@ final internal class MinimuxerImpl: MinimuxerAPI {
     }
     
     @discardableResult
-    private func checkDDIMountStatus() async throws(MinimuxerError) -> Bool {
-        let activeProtocol = self.gateway.pairingFileType
-        let ddiMounted = try await runIdeviceCheckingVPN("while checking DDI mount status", fallback: false) {
-            try await isDDIMounted()
-        }
-        guard ddiMounted else {
-            let msg = activeProtocol == .rppairing ? "dmg=\(ddiMounted) started=\(self.proxyServer.isListening)" : "DeveloperDiskImage is not mounted"
-            if activeProtocol == .rppairing {
-                verboseLog("minimuxer not ready (\(activeProtocol)): \(msg)")
-            }
-            throw MinimuxerError.mount(protocol: activeProtocol, reason: msg)
-        }
-        return true
-    }
-
-
-    @discardableResult
     private func configureRefreshTransport() async -> RefreshTransportDecision {
         let modernOS: Bool
         if #available(iOS 26.4, *) { modernOS = true } else { modernOS = false }
@@ -131,11 +119,11 @@ final internal class MinimuxerImpl: MinimuxerAPI {
     }
 
     func beginTransportBatch() async {
-        await gateway.beginTransportBatch()
+        await deviceProvider.beginTransportBatch()
         await configureRefreshTransport()
     }
 
-    func endTransportBatch() async { await gateway.endTransportBatch() }
+    func endTransportBatch() async { await deviceProvider.endTransportBatch() }
 
     func isReady(withNetworkCheck: Bool, withDDIMountCheck: Bool) async -> Result<Bool, MinimuxerError> {
         if !isPairingFileLoaded {
@@ -175,7 +163,7 @@ final internal class MinimuxerImpl: MinimuxerAPI {
         }
 
         // check if pairing file is loaded
-        let pairingType = getPairingFileType()
+        let pairingType = pairingFileType
         if pairingType == .unknown {
             debugLog("[minimuxer] minimuxer not ready: no valid pairing file loaded")
             return .failure(.pairingNotLoaded("No valid pairing file has been loaded in Minimuxer"))
@@ -187,84 +175,70 @@ final internal class MinimuxerImpl: MinimuxerAPI {
             deviceIp = try await self.endpoint.ip()
         } catch {
             switch connectionMode {
-            case .localVPN:
-                debugLog("[minimuxer] minimuxer not ready: tunnel peer IP not available despite tunnel iface being present")
-                return .failure(.noDevice("VPN tunnel iface is up but tunnel peer IP is not yet reachable — VPN may not be routing device traffic correctly. Cause: \(error.localizedDescription)"))
-            case .remoteServer:
-                debugLog("[minimuxer] minimuxer not ready: remote endpoint IP is not configured or reachable")
-                return .failure(.noDevice("Remote endpoint IP is not configured or reachable. Cause: \(error.localizedDescription)"))
-            case .notConfigured:
-                return .failure(connectionNotConfiguredError())
+                case .localVPN:
+                    debugLog("[minimuxer] minimuxer not ready: tunnel peer IP not available despite tunnel iface being present")
+                    return .failure(.noDevice("VPN tunnel iface is up but tunnel peer IP is not yet reachable — VPN may not be routing device traffic correctly. Cause: \(error.localizedDescription)"))
+                case .remoteServer:
+                    debugLog("[minimuxer] minimuxer not ready: remote endpoint IP is not configured or reachable")
+                    return .failure(.noDevice("Remote endpoint IP is not configured or reachable. Cause: \(error.localizedDescription)"))
+                case .notConfigured:
+                    return .failure(connectionNotConfiguredError())
             }
         }
         
         let peerReachable = testDeviceConnection(ifaddr: deviceIp)
         if !peerReachable {
             switch connectionMode {
-            case .localVPN:
-                debugLog("[minimuxer] minimuxer not ready: failed to connect to tunnel peer IP")
-                return .failure(.invalidVPN("VPN tunnel iface is up and tunnel peer IP \(deviceIp) is known, but TCP port poll failed — device may be unreachable on this interface"))
-            case .remoteServer:
-                debugLog("[minimuxer] minimuxer not ready: failed to connect to remote endpoint IP \(deviceIp)")
-                return .failure(.notReachable("Remote endpoint \(deviceIp) is configured, but TCP port poll failed — target device is unreachable"))
-            case .notConfigured:
-                return .failure(connectionNotConfiguredError())
+                case .localVPN:
+                    debugLog("[minimuxer] minimuxer not ready: failed to connect to tunnel peer IP")
+                    return .failure(.invalidVPN("VPN tunnel iface is up and tunnel peer IP \(deviceIp) is known, but TCP port poll failed — device may be unreachable on this interface"))
+                case .remoteServer:
+                    debugLog("[minimuxer] minimuxer not ready: failed to connect to remote endpoint IP \(deviceIp)")
+                    return .failure(.notReachable("Remote endpoint \(deviceIp) is configured, but TCP port poll failed — target device is unreachable"))
+                case .notConfigured:
+                    return .failure(connectionNotConfiguredError())
             }
         }
 
-        let activeProtocol = self.gateway.pairingFileType
-
-        let deviceUDID: String?
+        let deviceUDID: String
         do {
-            deviceUDID = try await runIdeviceCheckingVPN("while fetching device UDID", fallback: nil) {
-                try await fetchUDID()
-            }
+            deviceUDID = try await fetchUDID()
         } catch {
             return .failure(error)
         }
 
         verboseLog(
             "minimuxer status (.\(activeProtocol)): " +
-            "deviceUDID_present=\(deviceUDID != nil) " +
+            "deviceUDID_present=\(!deviceUDID.isEmpty) " +
             "started=\(self.proxyServer.isListening) "
         )
-        guard deviceUDID != nil else {
-            return .failure(.invalidPairing(protocol: activeProtocol, reason: ".\(activeProtocol) UDID not found"))
-        }
 
-        if activeProtocol != .rppairing {
-            guard self.proxyServer.isListening else {
-                return .failure(.muxerNotListening("Usbmuxd fake server is not listening"))
-            }
+        if self.gateway.requiresUsbmuxd && !self.proxyServer.isListening {
+            return .failure(.muxerNotListening("Usbmuxd fake server is not listening"))
         }
-
-        // end of core validation
 
         if withDDIMountCheck {
             do {
-                try await checkDDIMountStatus()
+                let isMounted = try await isDDIMounted()
+                verboseLog("minimuxer status (.\(activeProtocol)): dmg=\(isMounted) started=\(self.proxyServer.isListening)")
+                return .success(isMounted)
             } catch {
-                if case .mount = error {
-                    return .failure(error)
-                }
-                return .failure(.mount(protocol: activeProtocol, reason: error.description))
+                return .failure(error)
             }
         }
 
         return .success(true)
     } 
 
-    private func runIdeviceCheckingVPN<T>(_ context: String, fallback: T, action: () async throws -> T) async throws(MinimuxerError) -> T {
+    private func runWithChecks<T: Sendable>(_ context: String, catchAll: @escaping (String) -> MinimuxerError, action: @escaping @Sendable () async throws -> T) async throws(MinimuxerError) -> T {
         do {
-            return try await action()
-        } catch let err as DeviceGatewayError {
-            if err.code == .connectionFailed,
-               err.reason.lowercased().contains("broken pipe") || err.reason.lowercased().contains("brokenpipe") {
-                throw MinimuxerError.noVPN("VPN tunnel connection severed \(context). Cause: \(err.reason)")
+            return try await matchingPriority {
+                try await action()
             }
-            if context.contains("fetching device UDID") {
+        } catch let err as DeviceGatewayError {
+            if context.contains("fetching device UDID") && !err.isVPNDrop {
                 if err.code == .invalidPairingFile {
-                    throw MinimuxerError.invalidPairing(protocol: self.gateway.pairingFileType, reason: err.reason)
+                    throw MinimuxerError.invalidPairing(protocol: activeProtocol, reason: err.reason)
                 }
                 if err.code == .connectionFailed {
                     if err.reason.lowercased().contains("heartbeat") {
@@ -279,10 +253,10 @@ final internal class MinimuxerImpl: MinimuxerAPI {
                     if err.reason.contains("UniqueDeviceID") {
                         throw MinimuxerError.getLockdownValue(err.reason)
                     }
-                    if err.reason.contains("stage=rsd_service") || (err.reason.contains("RSD") && err.reason.contains("service")) {
+                    if err.reason.contains("stage=rsd_service") || err.reason.contains("stage=rsdService") || (err.reason.contains("RSD") && err.reason.contains("service")) {
                         throw MinimuxerError.noService(err.reason)
                     }
-                    if err.reason.contains("Lockdown") || err.reason.contains("lockdown") {
+                    if err.reason.lowercased().contains("lockdown") {
                         throw MinimuxerError.createLockdown(err.reason)
                     }
                     throw MinimuxerError.noService(err.reason)
@@ -292,14 +266,9 @@ final internal class MinimuxerImpl: MinimuxerAPI {
                 }
                 throw MinimuxerError.noDevice(err.reason)
             }
-            return fallback
-        } catch let err as MinimuxerError {
-            throw err
+            throw err.asMinimuxerError(protocol: activeProtocol, catchAll: catchAll)
         } catch {
-            if context.contains("fetching device UDID") {
-                throw MinimuxerError.noDevice(error.localizedDescription)
-            }
-            return fallback
+            throw (error as? MinimuxerError) ?? catchAll("\(error)")
         }
     }
 
@@ -316,7 +285,7 @@ final internal class MinimuxerImpl: MinimuxerAPI {
         self.connectionManager.deviceProbeTimeout = timeoutMs
     }
     
-    func retargetUsbmuxdAddr() {
+    private func retargetUsbmuxdAddr() {
         verboseLog("[minimuxer] unsetenv(USBMUXD_SOCKET_ADDRESS)")
         unsetenv(MinimuxerConstants.usbmuxdEnvKey)
         verboseLog("[minimuxer] setenv(USBMUXD_SOCKET_ADDRESS, \(MinimuxerConstants.usbmuxdSocket))")
@@ -332,28 +301,31 @@ final internal class MinimuxerImpl: MinimuxerAPI {
     }
     
     
-    private func restartMuxerServer() async throws {
-        guard self.gateway.pairingFileType != .rppairing else { return }
-        // restartMuxerServer only applies to the lockdown protocol path
+    private func restartMuxerServer() async throws(MinimuxerError) {
+        guard self.gateway.requiresUsbmuxd else { return }
         guard let pairingDict = self.gateway.pairingDataDict else {
             debugLog("[minimuxer] ERROR: Pairing DICT missing...ignoring restart MuxerServer")
-            throw MinimuxerError.invalidPairing(protocol: .lockdown, reason: "Pairing dictionary is missing in gateway")
+            throw MinimuxerError.pairingNotLoaded("Pairing dictionary is missing in gateway")
         }
         verboseLog("[minimuxer] loaded pairing file keys: \(pairingDict.keys)")
 
         guard let deviceUDID = pairingDict["UDID"] as? String else {
             debugLog("[minimuxer] ERROR: Pairing file missing UDID")
-            throw MinimuxerError.invalidPairing(protocol: .lockdown, reason: "Pairing file is missing UDID value")
+            throw MinimuxerError.invalidPairing(protocol: activeProtocol, reason: "Pairing file is missing UDID value")
         }
 
         // restart muxer
         await self.proxyServer.stop()
-        try await self.proxyServer.start(udid: deviceUDID)
+        do {
+            try await self.proxyServer.start(udid: deviceUDID)
+        } catch {
+            throw (error as? MinimuxerError) ?? MinimuxerError.connect("\(error)")
+        }
     }
     
     
     
-    func start(pairingFile: String, mountPath: String) async throws {
+    func start(pairingFile: String, mountPath: String, preferred: PairingProtocol?) async throws(MinimuxerError) {
         let connectionMode = await getConnectionMode()
         if DeviceConnectionMode.notConfigured == connectionMode {
             throw connectionNotConfiguredError()
@@ -364,16 +336,19 @@ final internal class MinimuxerImpl: MinimuxerAPI {
         await state.with{
             $0.status = .inprogress     // mark inprogress
             $0.lastDocsPath = mountPath // record the mountPath
+            $0.preferredProtocol = preferred
         }
         // let idevice initialize its state
-        try await matchingPriority {
-            try await self.gateway.start(pairingFileContent: pairingFile)
+        try await runWithChecks("while starting gateway", catchAll: { .invalidPairing(protocol: self.activeProtocol, reason: $0) }) {
+            try await self.gateway.start(pairingFileContent: pairingFile, preferred: preferred)
         }
         await configureRefreshTransport()
-        // retarget usbmuxd to our fake usbmuxd server (over network)
-        retargetUsbmuxdAddr()
-        // start our fake usbmuxd server for lockdown protocol based clients if required
-        try await restartMuxerServer()
+        if self.gateway.requiresUsbmuxd {
+            // retarget usbmuxd to our fake usbmuxd server (over network)
+            retargetUsbmuxdAddr()
+            // start our fake usbmuxd server for clients if required
+            try await restartMuxerServer()
+        }
         
         // mark ready!
         await state.with{
@@ -381,7 +356,7 @@ final internal class MinimuxerImpl: MinimuxerAPI {
         }
     }
 
-    func stop() async {
+    func stop() async throws(MinimuxerError) {
         // actor serialization scope
         let oldTask = await state.with { state -> Task<Bool, Error>? in
             state.status = .inprogress  // mark inprogress
@@ -391,27 +366,34 @@ final internal class MinimuxerImpl: MinimuxerAPI {
             return task
         }
         _ = await oldTask?.result       // await cancelled mount task completion
-        await self.proxyServer.stop()
+        if self.gateway.requiresUsbmuxd {
+            await self.proxyServer.stop()
+        }
+        try await runWithChecks("while stopping gateway", catchAll: MinimuxerError.close) {
+            try await self.gateway.stop()
+        }
         // mark ready!
         await state.with {
             $0.status = .stopped
         }
     }
     
-    private func restartWith(pairingFile: String, op: String) async throws {
-        let activeProtocol = self.gateway.pairingFileType
-        guard let mountPath = await state.lastDocsPath else {
+    private func restartWith(pairingFile: String, op: String) async throws(MinimuxerError) {
+        let (mountPath, preferred) = await state.with { ($0.lastDocsPath, $0.preferredProtocol) }
+        guard let mountPath else {
+            let activeProtocol = self.gateway.pairingFileType
             throw MinimuxerError.mount(protocol: activeProtocol, reason: "start() should be invoked before requesting \(op). cause: lastDocsPath is nil")
         }
-        await stop()
-        try await start(pairingFile: pairingFile, mountPath: mountPath)
+        try await stop()
+        try await start(pairingFile: pairingFile, mountPath: mountPath, preferred: preferred)
     }
 
-    func restart() async throws {
+    func restart() async throws(MinimuxerError) {
         verboseLog("[minimuxer] Restarting services...")
         let activeProtocol = self.gateway.pairingFileType
         guard let pairingData = self.gateway.pairingFileData,
-              let pairingFile = String(data: pairingData, encoding: .utf8) else {
+              let pairingFile = String(data: pairingData, encoding: .utf8) else
+        {
             debugLog("[minimuxer] restart: no existing pairing file — cannot restart")
             throw MinimuxerError.invalidPairing(protocol: activeProtocol, reason: "No existing pairing file found in gateway during restart")
         }
@@ -419,7 +401,7 @@ final internal class MinimuxerImpl: MinimuxerAPI {
         await self.network.refreshEndpoint()
     }
 
-    func reinitializePairingData(pairingFile: String) async throws {
+    func reinitializePairingData(pairingFile: String) async throws(MinimuxerError) {
         verboseLog("[minimuxer] Reinitializing with new pairing file...")
         try await restartWith(pairingFile: pairingFile, op: "reinitializePairingData")
     }
@@ -428,135 +410,155 @@ final internal class MinimuxerImpl: MinimuxerAPI {
         return NetworkUtils.testTCP(ip: ifaddr, port: self.gateway.servicePort, timeoutMs: timeout)
     }
 
-    private func ensureDDIMounted() async throws {
+    private func ensureDDIMounted() async throws(MinimuxerError) {
         let isMounted = (try? await self.gateway.isDDIMounted()) ?? false
         if isMounted {
             return
         }
-        guard let mountPath = await state.lastDocsPath else {
+        guard let mountPath = await state.lastDocsPath else
+        {
             let activeProtocol = self.gateway.pairingFileType
             throw MinimuxerError.mount(protocol: activeProtocol, reason: "DDI mount path not set")
         }
         verboseLog("[minimuxer] DDI not mounted, mounting now before launching debug session...")
-        try await self.mounter.mount(docsPath: mountPath)
+        try await self.mountDDI(docsPath: mountPath)
     }
 
     
     @discardableResult
-    func mountDDI(docsPath: String) async throws -> Bool {
-        // actor serialization scope
-        let oldTask = await state.with { state -> Task<Bool, Error>? in
-            state.lastDocsPath = docsPath   // record the mountPath
-            let task = state.mountTask
-            task?.cancel()                  // cancel the task
-            state.mountTask = nil
-            return task
+    func mountDDI(docsPath: String) async throws(MinimuxerError) -> Bool {
+        try await runWithChecks("while mounting DDI", catchAll: { .mount(protocol: self.activeProtocol, reason: $0) }) {
+            let oldTask = await self.state.with { state -> Task<Bool, Error>? in
+                state.lastDocsPath = docsPath
+                let task = state.mountTask
+                task?.cancel()
+                state.mountTask = nil
+                return task
+            }
+            _ = await oldTask?.result
+            let mounter = self.mounter
+            let task = Task.detached(priority: .medium) {
+                try await mounter.mount(docsPath: docsPath)
+            }
+            await self.state.with {
+                $0.mountTask = task
+            }
+            return try await task.value
         }
-        _ = await oldTask?.result           // await cancelled mount task completion
-        let mounter = self.mounter
-        let task = Task.detached(priority: .medium) {
-            try await mounter.mount(docsPath: docsPath)
-        }
-        await state.with {
-            $0.mountTask = task
-        }
-        return try await task.value
     }
 
-    func isDDIMounted() async throws -> Bool {
-        try await matchingPriority{
+    func isDDIMounted() async throws(MinimuxerError) -> Bool {
+        try await runWithChecks("while checking DDI mount status", catchAll: { .mount(protocol: self.activeProtocol, reason: $0) }) {
             try await self.gateway.isDDIMounted()
         }
     }
 
-    func fetchUDID() async throws -> String? {
-        try await matchingPriority{
+    func fetchUDID() async throws(MinimuxerError) -> String {
+        try await runWithChecks("while fetching device UDID", catchAll: MinimuxerError.fetchUDID) {
             try await self.gateway.fetchUDID()
         }
     }
 
-    func sendIpaAfc(bundleId: String, ipaBytes: Data) async throws {
-        try await matchingPriority{
+    func sendIpaAfc(bundleId: String, ipaBytes: Data) async throws(MinimuxerError) {
+        try await runWithChecks("while sending IPA via AFC", catchAll: MinimuxerError.rwAfc) {
             try await self.gateway.sendIpaAfc(bundleId: bundleId, ipaBytes: ipaBytes)
         }
     }
 
-    func sendAppBundleAfc(bundleId: String, appURL: URL) async throws {
-        try await matchingPriority {
+    func sendAppBundleAfc(bundleId: String, appURL: URL) async throws(MinimuxerError) {
+        try await runWithChecks("while sending App Bundle via AFC", catchAll: MinimuxerError.rwAfc) {
             try await self.gateway.sendAppBundleAfc(bundleId: bundleId, appURL: appURL)
         }
     }
 
-    func installIpa(bundleId: String) async throws {
-        try await matchingPriority{
+    func installIpa(bundleId: String) async throws(MinimuxerError) {
+        try await runWithChecks("while installing IPA", catchAll: MinimuxerError.installApp) {
             try await self.gateway.installIpa(bundleId: bundleId)
         }
     }
 
-    func installAppBundle(bundleId: String, appName: String) async throws {
-        try await matchingPriority {
+    func installAppBundle(bundleId: String, appName: String) async throws(MinimuxerError) {
+        try await runWithChecks("while installing App Bundle", catchAll: MinimuxerError.installApp) {
             try await self.gateway.installAppBundle(bundleId: bundleId, appName: appName)
         }
     }
 
-    func removeApp(bundleId: String) async throws {
-        try await matchingPriority{
+    func removeApp(bundleId: String) async throws(MinimuxerError) {
+        try await runWithChecks("while removing App", catchAll: MinimuxerError.uninstallApp) {
             try await self.gateway.removeApp(bundleId: bundleId)
         }
     }
 
-    func wipeContainer(identifier: String) async throws {
-        try await matchingPriority{
+    func wipeContainer(identifier: String) async throws(MinimuxerError) {
+        try await runWithChecks("while wiping container", catchAll: MinimuxerError.uninstallApp) {
             try await self.gateway.wipeContainer(identifier: identifier)
         }
     }
 
-    func debugApp(appId: String) async throws {
-        try await matchingPriority{
+    func debugApp(appId: String) async throws(MinimuxerError) {
+        try await runWithChecks("while debugging App", catchAll: MinimuxerError.createDebug) {
             try await self.ensureDDIMounted()
             try await self.gateway.debugApp(appId: appId)
         }
     }
 
-    func attachDebugger(pid: UInt32) async throws {
-        try await matchingPriority{
+    func attachDebugger(pid: UInt32) async throws(MinimuxerError) {
+        try await runWithChecks("while debugging process", catchAll: MinimuxerError.createDebug) {
             try await self.ensureDDIMounted()
             try await self.gateway.debugProcess(pid: pid)
         }
     }
 
-    func installProvisioningProfile(profile: Data) async throws {
-        try await matchingPriority{
+    func installProvisioningProfile(profile: Data) async throws(MinimuxerError) {
+        try await runWithChecks("while installing profile", catchAll: MinimuxerError.profileInstall) {
             try await self.gateway.installProvisioningProfile(profile: profile)
         }
     }
 
-    func removeProvisioningProfile(id: String) async throws {
-        try await matchingPriority{
+    func removeProvisioningProfile(id: String) async throws(MinimuxerError) {
+        try await runWithChecks("while removing profile", catchAll: MinimuxerError.profileRemove) {
             try await self.gateway.removeProvisioningProfile(id: id)
         }
     }
 
-    func dumpProfiles(docsPath: String) async throws -> String {
-        try await matchingPriority{
-            try await self.gateway.dumpProfiles(docsPath: docsPath)
+    func dumpProfiles(docsPath: String, mode: ProfileDumpMode = .zip) async throws(MinimuxerError) -> String {
+        try await runWithChecks("while dumping profiles", catchAll: MinimuxerError.createMisagent) {
+            switch mode {
+                case .raw:
+                    verboseLog("[minimuxer] dumpProfiles(mode: .raw) dumping profiles")
+                    return try await self.gateway.dumpProfiles(docsPath: docsPath)
+                case .zip:
+                    verboseLog("[minimuxer] dumpProfiles(mode: .zip) staging to temporary directory")
+                    let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
+                    defer {
+                        verboseLog("[minimuxer] dumpProfiles(mode: .zip) cleaning up temporary directory")
+                        try? FileManager.default.removeItem(at: tempDir)
+                    }
+
+                    let dumpedPath = try await self.gateway.dumpProfiles(docsPath: tempDir.path)
+                    let zipURL = URL(fileURLWithPath: docsPath).appendingPathComponent("Profiles-\(ISO8601DateFormatter().string(from: Date())).zip")
+                    verboseLog("[minimuxer] dumpProfiles(mode: .zip) compressing profiles")
+                    try FileManager.default.zipItem(at: URL(fileURLWithPath: dumpedPath), to: zipURL, shouldKeepParent: false)
+                    verboseLog("[minimuxer] dumpProfiles(mode: .zip) archive created")
+                    return zipURL.path
+            }
         }
     }
 
-    func afcListDirectory(bundleId: String, path: String) async throws -> [String] {
-        try await matchingPriority {
+    func afcListDirectory(bundleId: String, path: String) async throws(MinimuxerError) -> [String] {
+        try await runWithChecks("while listing AFC directory", catchAll: MinimuxerError.createAfc) {
             try await self.gateway.afcListDirectory(bundleId: bundleId, path: path)
         }
     }
 
-    func afcReadFile(bundleId: String, path: String) async throws -> Data {
-        try await matchingPriority {
+    func afcReadFile(bundleId: String, path: String) async throws(MinimuxerError) -> Data {
+        try await runWithChecks("while reading AFC file", catchAll: MinimuxerError.rwAfc) {
             try await self.gateway.afcReadFile(bundleId: bundleId, path: path)
         }
     }
 
-    func afcGetFileInfo(bundleId: String, path: String) async throws -> (isDirectory: Bool, fileSize: Int64) {
-        try await matchingPriority {
+    func afcGetFileInfo(bundleId: String, path: String) async throws(MinimuxerError) -> (isDirectory: Bool, fileSize: Int64) {
+        try await runWithChecks("while getting AFC file info", catchAll: MinimuxerError.createAfc) {
             try await self.gateway.afcGetFileInfo(bundleId: bundleId, path: path)
         }
     }

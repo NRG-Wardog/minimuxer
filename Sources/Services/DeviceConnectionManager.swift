@@ -11,7 +11,10 @@ internal import MinimuxerCommon
 internal import DeviceGatewayAPI
 
 actor DeviceConnectionManager {
-    let gateway: any DeviceGatewayAPI
+    let deviceProvider: DeviceProvider
+    var gateway: any DeviceGatewayAPI {
+        deviceProvider.gateway
+    }
 
     private var interfacesCache: Set<NetInfo> = []
     private var connectionConfigCache: ConnectionConfigBinding?
@@ -38,8 +41,8 @@ actor DeviceConnectionManager {
         set { lock.withLock { cachedDeviceProbeTimeout = newValue } }
     }
 
-    init(gateway: any DeviceGatewayAPI, deviceProbeTimeout: Int = MinimuxerConstants.defaultTCPProbeTimeoutMs) {
-        self.gateway = gateway
+    init(deviceProvider: DeviceProvider, deviceProbeTimeout: Int = MinimuxerConstants.defaultTCPProbeTimeoutMs) {
+        self.deviceProvider = deviceProvider
         self.cachedDeviceProbeTimeout = deviceProbeTimeout
     }
 
@@ -60,14 +63,29 @@ actor DeviceConnectionManager {
         connectionConfigCache?.getConnectionMode() ?? .notConfigured
     }
 
-    nonisolated private func tcpProbe(_ ip: String?) -> Bool {
+    private func tcpProbe(_ ip: String?) async -> Bool {
         guard let ip, !ip.isEmpty else {
             debugLog("[minimuxer] [iface] tcpProbe skipped — IP is nil or empty")
             return false
         }
-        let port = gateway.servicePort
-        let reachable = NetworkUtils.testTCP(ip: ip, port: port, timeoutMs: deviceProbeTimeout)
-        debugLog("[minimuxer] [iface] tcpProbe \(ip):\(port) (protocol: .\(gateway.pairingFileType)) -> \(reachable ? "reachable" : "unreachable")")
+        let currentProtocol = gateway.pairingFileType
+        let currentPort = gateway.servicePort
+        var reachable = NetworkUtils.testTCP(ip: ip, port: currentPort, timeoutMs: deviceProbeTimeout)
+
+        if !reachable, let resolver = connectionConfigCache?.resolveServicePort {
+            let current = ServicePort(protocolType: currentProtocol, port: currentPort)
+            let resolved = await resolver(current)
+
+            if resolved.port != currentPort {
+                // retry probe after resolving new target port
+                let newPortReachable = NetworkUtils.testTCP(ip: ip, port: resolved.port, timeoutMs: deviceProbeTimeout)
+                if newPortReachable {
+                    gateway.setPort(resolved.port, for: currentProtocol)
+                    reachable = true
+                }
+            }
+        }
+        debugLog("[minimuxer] [iface] tcpProbe port=\(gateway.servicePort) protocol=\(gateway.pairingFileType) reachable=\(reachable)")
         return reachable
     }
 
@@ -103,7 +121,7 @@ actor DeviceConnectionManager {
 
                 let rawOverrideIp = connectionConfigCache?.getOverrideTunnelPeerIp()
                 overridePeerIp = (rawOverrideIp?.isEmpty ?? true) ? nil : rawOverrideIp
-                isOverridePeerIpReachable = tcpProbe(overridePeerIp)
+                isOverridePeerIpReachable = await tcpProbe(overridePeerIp)
             
                 let isOverrideIpUnchanged = lastOverrideIp == overridePeerIp
                 let isDerivedIpUnchanged = lastDerivedPeer == derivedPeerIp && lastDerivedPeerMask == derivedPeerSubnetMask
@@ -149,7 +167,7 @@ actor DeviceConnectionManager {
             case .remoteServer:
                 let rawServerIp = connectionConfigCache?.getRemoteServerIp()
                 let serverIp = (rawServerIp?.isEmpty ?? true) ? nil : rawServerIp
-                let reachable = tcpProbe(serverIp)
+                let reachable = await tcpProbe(serverIp)
                 if self.lastConnectionMode == connectionMode && serverIp == remoteServerIp && reachable == isRemoteServerIpReachable {
                     debugLog("[minimuxer] [iface] no remote server state changes detected, skipping refresh")
                     return false
@@ -179,31 +197,35 @@ actor DeviceConnectionManager {
         }
     }
 
-    private struct CandidatePeer: Equatable, Sendable {
+    struct CandidatePeer: Equatable, Sendable {
         let tunnel: TunnelNetInfo
         let ip: String
         let mask: String?
     }
 
-    private func resolveLocalVPNTunnel(from interfaces: Set<NetInfo>) async -> (tunnel: TunnelNetInfo?, candidatePeer: CandidatePeer?, isReachable: Bool) {
-        // Device connection strictly operates on IPv4 utun tunnels only
-        let tunnels = interfaces
+    static func resolveCandidateTunnels(from interfaces: Set<NetInfo>) -> [TunnelNetInfo] {
+        interfaces
             .compactMap { $0 as? TunnelNetInfo }
             .filter { 
-                 $0.tunnelType == .utun && 
+                $0.tunnelType == .utun && 
                 !$0.interfaceAddresses.v4.isEmpty && $0.interfaceAddresses.v6.isEmpty 
             }
             .sorted { $0.name < $1.name }
-        guard !tunnels.isEmpty else { return (nil, nil, false) }
+    }
 
+    static func resolveCandidatePeers(from interfaces: Set<NetInfo>) -> [CandidatePeer] {
+        resolveCandidateTunnels(from: interfaces).flatMap { resolveCandidatePeers(for: $0) }
+    }
+
+    private func resolveLocalVPNTunnel(from interfaces: Set<NetInfo>) async -> (tunnel: TunnelNetInfo?, candidatePeer: CandidatePeer?, isReachable: Bool) {
         // pick all candidate peer ips
-        let candidates = tunnels.flatMap { resolveCandidatePeers(for: $0) }
+        let candidates = Self.resolveCandidatePeers(from: interfaces)
         guard !candidates.isEmpty else { return (nil, nil, false) }
 
         // parallelized tcp service port probing on all candidate ips
         let resolved = await withTaskGroup(of: CandidatePeer?.self, returning: CandidatePeer?.self) { group in
             for candidate in candidates {
-                group.addTask { self.tcpProbe(candidate.ip) ? candidate : nil }
+                group.addTask { await self.tcpProbe(candidate.ip) ? candidate : nil }
             }
             for await case let candidate? in group {
                 group.cancelAll()
@@ -219,7 +241,7 @@ actor DeviceConnectionManager {
         return (nil, nil, false)
     }
 
-    private func isValidCandidatePeer(_ ip: String, for tunnel: TunnelNetInfo) -> Bool {
+    private static func isValidCandidatePeer(_ ip: String, for tunnel: TunnelNetInfo) -> Bool {
         guard !ip.isEmpty,
                ip != "0.0.0.0",             // reject catch all  addr (not unicast connectable)
                ip != "default",             // reject default    addr (not unicast connectable)
@@ -235,7 +257,7 @@ actor DeviceConnectionManager {
         return !isSelf
     }
 
-    private func resolveCandidatePeers(for tunnel: TunnelNetInfo) -> [CandidatePeer] {
+    private static func resolveCandidatePeers(for tunnel: TunnelNetInfo) -> [CandidatePeer] {
         var candidates: [CandidatePeer] = []
         var seen = Set<String>()
 

@@ -110,8 +110,10 @@ public final class EMProxyImpl: @unchecked Sendable, EMProxyAPI {
                 }
             }
         }
-        if config.enabled {
+        if config.enabled && !config.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             await triggerVPNHandshake(host: config.host, port: config.port)
+        } else {
+            await probeVPNHandshake(port: config.port != 0 ? config.port : MinimuxerConstants.lockdowndPort)
         }
     }
 
@@ -145,46 +147,93 @@ public final class EMProxyImpl: @unchecked Sendable, EMProxyAPI {
         let startTime = Date()
         
         while Date().timeIntervalSince(startTime) < timeout {
-            let connection = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
-            
-            let success = await withCheckedContinuation { continuation in
-                var resolved = false
-                let lock = NSLock()
-                
-                let resolve = { (result: Bool) in
-                    lock.withLock {
-                        if !resolved {
-                            resolved = true
-                            continuation.resume(returning: result)
-                        }
-                    }
-                }
-                
-                connection.stateUpdateHandler = { state in
-                    debugLog("[EMProxy] triggerVPNHandshake state: \(state)")
-                    if let result = self.isProbeSuccessful(for: state) {
-                        resolve(result)
-                    }
-                }
-                connection.start(queue: .global())
-                
-                // Limit this probe attempt to 1 second
-                Task {
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                    resolve(false)
-                    connection.cancel()
-                }
-            }
-            
-            connection.cancel()
-            
+            let success = await probeHost(host, port: port)
             if success {
                 return // Tunnel is ready!
             }
-            
-            // Wait 200ms before starting the next probe
             try? await Task.sleep(nanoseconds: 200_000_000)
         }
+    }
+
+    private func probeVPNHandshake(port: UInt16) async {
+        let candidates = discoverUtunCandidateDestinations()
+        guard !candidates.isEmpty else {
+            debugLog("[EMProxy] probeVPNHandshake skipped: no utun interface candidates found")
+            return
+        }
+
+        debugLog("[EMProxy] probeVPNHandshake starting candidate_count=\(candidates.count), port=\(port)")
+        let timeout = Double(MinimuxerConstants.vpnHandshakeTimeoutNs) / 1_000_000_000.0
+        let startTime = Date()
+
+        while Date().timeIntervalSince(startTime) < timeout {
+            let success = await withTaskGroup(of: Bool.self) { group in
+                for host in candidates {
+                    group.addTask {
+                        await self.probeHost(host, port: port)
+                    }
+                }
+
+                for await result in group {
+                    if result {
+                        group.cancelAll()
+                        return true
+                    }
+                }
+                return false
+            }
+
+            if success {
+                debugLog("[EMProxy] probeVPNHandshake succeeded!")
+                return
+            }
+
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        debugLog("[EMProxy] probeVPNHandshake timed out after \(timeout)s")
+    }
+
+    private func probeHost(_ host: String, port: UInt16) async -> Bool {
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else { return false }
+        let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
+
+        let states = AsyncStream<NWConnection.State> { continuation in
+            connection.stateUpdateHandler = { state in
+                continuation.yield(state)
+            }
+            continuation.onTermination = { @Sendable _ in
+                connection.cancel()
+            }
+            connection.start(queue: .global())
+        }
+
+        return await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                for await state in states {
+                    debugLog("[EMProxy] probeHost state changed")
+                    if let result = self.isProbeSuccessful(for: state) {
+                        connection.cancel()
+                        return result
+                    }
+                }
+                return false
+            }
+
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                connection.cancel()
+                return false
+            }
+
+            let firstResult = await group.next() ?? false
+            group.cancelAll()
+            return firstResult
+        }
+    }
+
+    private func discoverUtunCandidateDestinations() -> [String] {
+        let interfaces = NetworkIfaceScanner.scan(quiet: true)
+        return DeviceConnectionManager.resolveCandidatePeers(from: interfaces).map(\.ip)
     }
 
     private func isProbeSuccessful(for state: NWConnection.State) -> Bool? {

@@ -13,7 +13,10 @@ internal import DeviceGatewayAPI
 internal import MinimuxerCommon
 
 final internal class UsbmuxdProxyServer {
-    let gateway: any DeviceGatewayAPI
+    let deviceProvider: DeviceProvider
+    var gateway: any DeviceGatewayAPI {
+        deviceProvider.gateway
+    }
 
     private var maxBufferLen: Int { MinimuxerConstants.usbmuxMaxPacketBufferLength }
     private var headerLen: Int { MinimuxerConstants.usbmuxHeaderLen }
@@ -29,8 +32,8 @@ final internal class UsbmuxdProxyServer {
     private var currentDeviceIp: String?
     private var currentEvent: String?
 
-    init(gateway: any DeviceGatewayAPI) {
-        self.gateway = gateway
+    init(deviceProvider: DeviceProvider) {
+        self.deviceProvider = deviceProvider
     }
 
     func notifyDeviceAttached(tunnelPeerIp: String) {
@@ -218,7 +221,7 @@ final internal class UsbmuxdProxyServer {
                     "Properties": [
                         "ConnectionType": "Network",                                    // using 'network' protocol of usbmuxd
                         "DeviceID": 1,                                                  // fake non-zero device id
-                        "EscapedFullServiceName": "\(udid)._apple-mobdev2._tcp.local",  // advert for mds discovery
+                        "EscapedFullServiceName": "\(udid)._apple-mobdev2._tcp.local",  // advert for mDNS discovery
                         "InterfaceIndex": 0,                                            // don't care
                         "NetworkAddress": convertIp(tunnelIfaceIp),                     // remote IP where device's lockdownd is accepting requests on
                         "SerialNumber": udid                                            // device UDID
@@ -232,7 +235,7 @@ final internal class UsbmuxdProxyServer {
                 return ["BUID": buid]
             case "ReadPairRecord":
                 guard let pairingData = self.gateway.pairingFileData else {
-                    throw MinimuxerError.invalidPairing(protocol: .lockdown, reason: "No pairing file data available for ReadPairRecord")
+                    throw MinimuxerError.pairingNotLoaded("No pairing file data available for ReadPairRecord")
                 }
                 return ["PairRecordData": pairingData]
             default:
