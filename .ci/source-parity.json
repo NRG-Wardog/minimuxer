@@ -32,7 +32,7 @@
       "path": ".ci/upstream-sync-smoke.swift",
       "upstream_sha256": null,
       "previous_fork_sha256": null,
-      "new_source_sha256": "ea8b295db77871c7c34f38d763dc51848c3f9f398f74564be231d3189cce7890",
+      "new_source_sha256": "812f3db768ff15c1708ab83971c654c4809cfd7a1e366974fcf45140ffe298c1",
       "mode": "0o644",
       "git_mode": "100644",
       "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
@@ -41,7 +41,7 @@
       "path": ".ci/verify-upstream-sync.py",
       "upstream_sha256": null,
       "previous_fork_sha256": null,
-      "new_source_sha256": "6d070a8f6f8750b6a80679831527c83f7e2fb8e747dfb50bad14116a1b939a20",
+      "new_source_sha256": "652fbf9dfbf2443f402e49fd119ebfc96a96d3843c9750452314a7ade98203bb",
       "mode": "0o644",
       "git_mode": "100644",
       "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
@@ -131,7 +131,7 @@
       "path": "Sources/MinimuxerImpl.swift",
       "upstream_sha256": "50cf0d90c1288573e94258a39c1f99e5342ab52ec68a73a6f88d3154fc4a3762",
       "previous_fork_sha256": "530f091ef950a611eaf9eebe86e86aef04ee9df98152fe20610c3534ebce678e",
-      "new_source_sha256": "3d5cab382c0bb262110b767a925222c4beaec6748766dd8b3168ed61fa7fec55",
+      "new_source_sha256": "92f350fbbfa4a6a870458b428d11c92a9ace7c7fa5c9ef7c31c7d926ef5acc61",
       "mode": "0o644",
       "git_mode": "100644",
       "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
@@ -140,7 +140,7 @@
       "path": "Sources/RefreshTransportPolicy.swift",
       "upstream_sha256": null,
       "previous_fork_sha256": "1ddc3d112d8a218db2c8017947595782fbe625dcdf7fef1fc6d4495f8b8b15d0",
-      "new_source_sha256": "1ddc3d112d8a218db2c8017947595782fbe625dcdf7fef1fc6d4495f8b8b15d0",
+      "new_source_sha256": "35d4d922b653ed394da69ba2f5725171e3824f6cb8aef24888bb23e3f3cc35ab",
       "mode": "0o644",
       "git_mode": "100644",
       "subsystem": "Reviewed upstream synchronization preserving NRG transport and introduced-log privacy"
@@ -201,7 +201,7 @@
   "follow_on": {
     "candidate_commit_status": "pending_root_owned_single_parent_follow_on",
     "required_commit_parents": [
-      "48419a2d24bd74efcee6dc80552ea89e85dafdee"
+      "1d033920660c6f50b8f30c4c333f025867cd9e96"
     ],
     "merge_anchor": {
       "commit": "48419a2d24bd74efcee6dc80552ea89e85dafdee",
@@ -212,6 +212,23 @@
       ],
       "merge_base": "98c3c79982f813878e922ab42f9545314a700f0c"
     },
-    "scope": "Explicit internal helper import plus source-owned fake checker compatibility; no public API, ownership, compiler-flag or source-verifier changes."
+    "scope": "Classify the proven local-VPN/no usable-interface decision as existing noVPN using the same policy snapshot; preserve every transport choice, all other error families, public error API, and exact frozen-source checks.",
+    "previous_follow_on": {
+      "commit": "1d033920660c6f50b8f30c4c333f025867cd9e96",
+      "required_commit_parents": [
+        "48419a2d24bd74efcee6dc80552ea89e85dafdee"
+      ],
+      "source_parity_manifest_sha256": "fe8e6d7b8ccfe10e9addac80991260661427bd0f0f78206e567466ed135aa522"
+    },
+    "behavior_changes": [
+      "A proven localVPN/no usable utun decision now returns existing noVPN instead of invalidVPN, enabling the existing bounded host recovery. Configuration, pairing and unsupported-backend policy failures remain invalidVPN."
+    ],
+    "tests_run": [
+      "Actual-source fixture generation and Python source contracts; transport matrix and scanner/classifier assertions prepared for native CI."
+    ],
+    "tests_not_run": [
+      "Swift fixtures and Xcode builds have not run in this worker; no local Swift compiler.",
+      "No native backend, real device, authentication, or VPN manipulation."
+    ]
   }
 }

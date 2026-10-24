@@ -109,7 +109,8 @@ final class FakeConfigurationFacade: MinimuxerFacade, @unchecked Sendable {
                     for utun in [false, true] {
                         for ipsec in [false, true] {
                             for supported in [false, true] {
-                                let selected = RefreshTransportPolicy.select(modernOS: modern, mode: mode, pairing: pairing, utun: utun, ipsec: ipsec, coreDeviceSupported: supported).transport
+                                let decision = RefreshTransportPolicy.select(modernOS: modern, mode: mode, pairing: pairing, utun: utun, ipsec: ipsec, coreDeviceSupported: supported)
+                                let selected = decision.transport
                                 let expected: RefreshTransport
                                 if pairing == .unknown { expected = .unavailable }
                                 else if mode == .remoteServer { expected = .proxy }
@@ -120,6 +121,20 @@ final class FakeConfigurationFacade: MinimuxerFacade, @unchecked Sendable {
                                 else if !modern { expected = .lockdownLegacy }
                                 else { expected = .unavailable }
                                 require(selected == expected, "Transport matrix mismatch")
+                                let cause: RefreshTransportUnavailableCause?
+                                if pairing == .unknown { cause = .pairingUnavailable }
+                                else if mode == .remoteServer { cause = nil }
+                                else if mode != .localVPN { cause = .connectionModeNotConfigured }
+                                else if !utun {
+                                    cause = modern && pairing == .lockdown && !supported && !ipsec
+                                        ? .unsupportedBackend : .missingRequiredVPNInterface
+                                } else if selected == .unavailable { cause = .unsupportedBackend }
+                                else { cause = nil }
+                                require(decision.unavailableCause == cause, "Finite readiness cause matrix mismatch")
+                                if cause == .missingRequiredVPNInterface {
+                                    require(mode == .localVPN && pairing != .unknown && !utun,
+                                            "VPN recovery cause escaped proven local snapshot")
+                                }
                                 cases += 1
                             }
                         }

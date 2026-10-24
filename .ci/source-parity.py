@@ -78,6 +78,6 @@ def verify():
                 dirs.remove(name)
         files.update(((rel / name).as_posix() for name in names))
     require(files == set(actual) - gitlinks, 'unexpected filesystem inventory')
-    return {'owner': SPEC['owner'], 'status': 'exact_frozen_source_pass', 'upstream_base': base, 'fork_commit': git('rev-parse', 'HEAD').decode().strip(), 'product_files_verified': checked, 'migrated_files': len(delta), 'submodules': submodules, 'behavior_changes': []}
+    return {'owner': SPEC['owner'], 'status': 'exact_frozen_source_pass', 'upstream_base': base, 'fork_commit': git('rev-parse', 'HEAD').decode().strip(), 'product_files_verified': checked, 'migrated_files': len(delta), 'submodules': submodules, 'behavior_changes': SPEC.get('follow_on', {}).get('behavior_changes', [])}
 if __name__ == '__main__':
     print(json.dumps(verify(), indent=2))

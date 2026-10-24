@@ -107,14 +107,18 @@ final internal class MinimuxerImpl: MinimuxerAPI {
         let modernOS: Bool
         if #available(iOS 26.4, *) { modernOS = true } else { modernOS = false }
         let mode = await getConnectionMode()
-        let utun = network.isUTunAvailable
-        let ipsec = network.isIKEv2IPSecAvailable
+        // One scanner snapshot for both route predicates and the finite cause.
+        // An up addressless utun is intentionally not a usable interface.
+        let interfaces = NetworkIfaceScanner.scan(quiet: true)
+        let utun = interfaces.contains { $0.name.lowercased().hasPrefix("utun") }
+        let ipsec = interfaces.contains { $0.name.lowercased().hasPrefix("ipsec") }
+        let pairing = gateway.pairingFileType
         let decision = RefreshTransportPolicy.select(
-            modernOS: modernOS, mode: mode, pairing: gateway.pairingFileType,
+            modernOS: modernOS, mode: mode, pairing: pairing,
             utun: utun, ipsec: ipsec, coreDeviceSupported: gateway.supportsCoreDeviceTransport)
         gateway.configureCoreDeviceTransport(decision.transport == .coreDevice)
         // Interface presence cannot establish the identity of the App Store VPN.
-        debugLog("[SIDESTORE_COREDEVICE] TRANSPORT_SELECTION os_version=\(ProcessInfo.processInfo.operatingSystemVersionString) pairing_mode=\(gateway.pairingFileType) localdevvpn_detected=unverified utun_detected=\(utun) ipsec_interface_detected=\(ipsec) selected_transport=\(decision.transport.rawValue) reason=\(decision.reason)")
+        debugLog("[SIDESTORE_COREDEVICE] TRANSPORT_SELECTION os_version=\(ProcessInfo.processInfo.operatingSystemVersionString) pairing_mode=\(pairing) localdevvpn_detected=unverified utun_detected=\(utun) ipsec_interface_detected=\(ipsec) selected_transport=\(decision.transport.rawValue) reason=\(decision.reason)")
         return decision
     }
 
@@ -154,6 +158,12 @@ final internal class MinimuxerImpl: MinimuxerAPI {
 
         let decision = await configureRefreshTransport()
         if decision.transport == .unavailable {
+            // V3_LOCALVPN_INTERFACE_RECOVERY_V1: only the same policy snapshot
+            // may produce noVPN. Configuration, pairing and backend failures
+            // retain invalidVPN and cannot authorize automatic activation.
+            if decision.unavailableCause == .missingRequiredVPNInterface {
+                return .failure(.noVPN(decision.reason))
+            }
             return .failure(.invalidVPN(decision.reason))
         }
         if decision.transport == .coreDevice {
