@@ -34,7 +34,7 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../Common"),
-        .package(url: "https://github.com/mahee96/RemotePairingKit.git", branch: "main")
+        .package(path: "../GeneratedDependencies/RemotePairingKit")
 //        .package(path: "../../../../local/RemotePairingKit")
     ],
     targets: [
