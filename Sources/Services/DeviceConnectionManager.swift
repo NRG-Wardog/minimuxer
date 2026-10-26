@@ -11,6 +11,20 @@ internal import MinimuxerCommon
 internal import DeviceGatewayAPI
 
 actor DeviceConnectionManager {
+    // Binding replacement and mutable preference values both identify a scan.
+    struct ConfigurationIdentity: Equatable, Sendable {
+        let generation: UInt64
+        let mode: DeviceConnectionMode
+        let overridePeer: String
+        let remotePeer: String
+    }
+    private var configurationGeneration: UInt64 = 0
+    func configurationIdentity() -> ConfigurationIdentity {
+        .init(generation: configurationGeneration, mode: getPreferredConnectionMode(),
+              overridePeer: connectionConfigCache?.getOverrideTunnelPeerIp() ?? "",
+              remotePeer: connectionConfigCache?.getRemoteServerIp() ?? "")
+    }
+
     let deviceProvider: DeviceProvider
     var gateway: any DeviceGatewayAPI {
         deviceProvider.gateway
@@ -47,6 +61,7 @@ actor DeviceConnectionManager {
     }
 
     func bindConnectionConfig(_ binding: ConnectionConfigBinding) {
+        configurationGeneration &+= 1
         connectionConfigCache = binding
         // ensure started if not started already
         let connectionMode = binding.getConnectionMode()
@@ -68,6 +83,7 @@ actor DeviceConnectionManager {
             debugLog("[minimuxer] [iface] tcpProbe skipped — IP is nil or empty")
             return false
         }
+        let configuration = configurationIdentity()
         let currentProtocol = gateway.pairingFileType
         let currentPort = gateway.servicePort
         var reachable = NetworkUtils.testTCP(ip: ip, port: currentPort, timeoutMs: deviceProbeTimeout)
@@ -75,6 +91,7 @@ actor DeviceConnectionManager {
         if !reachable, let resolver = connectionConfigCache?.resolveServicePort {
             let current = ServicePort(protocolType: currentProtocol, port: currentPort)
             let resolved = await resolver(current)
+            guard configurationIdentity() == configuration else { return false }
 
             if resolved.port != currentPort {
                 // retry probe after resolving new target port
@@ -91,6 +108,7 @@ actor DeviceConnectionManager {
 
     @discardableResult
     func refresh(quietScan: Bool = false) async -> Bool {
+        let configuration = configurationIdentity()
         let connectionMode = getPreferredConnectionMode()
         defer { lastConnectionMode = connectionMode }
 
@@ -113,6 +131,7 @@ actor DeviceConnectionManager {
                 interfacesCache = NetworkIfaceScanner.scan(quiet: quietScan)
                 
                 let (resolvedTunnel, candidatePeer, isDerivedReachable) = await resolveLocalVPNTunnel(from: interfacesCache)
+                guard configurationIdentity() == configuration else { return false }
                 vpnIface = resolvedTunnel
                 reportedPeerIp = resolvedTunnel?.linkLayerDestinationIP?.v4?.host
                 derivedPeerIp = candidatePeer?.ip
@@ -122,6 +141,7 @@ actor DeviceConnectionManager {
                 let rawOverrideIp = connectionConfigCache?.getOverrideTunnelPeerIp()
                 overridePeerIp = (rawOverrideIp?.isEmpty ?? true) ? nil : rawOverrideIp
                 isOverridePeerIpReachable = await tcpProbe(overridePeerIp)
+                guard configurationIdentity() == configuration else { return false }
             
                 let isOverrideIpUnchanged = lastOverrideIp == overridePeerIp
                 let isDerivedIpUnchanged = lastDerivedPeer == derivedPeerIp && lastDerivedPeerMask == derivedPeerSubnetMask
@@ -168,6 +188,7 @@ actor DeviceConnectionManager {
                 let rawServerIp = connectionConfigCache?.getRemoteServerIp()
                 let serverIp = (rawServerIp?.isEmpty ?? true) ? nil : rawServerIp
                 let reachable = await tcpProbe(serverIp)
+                guard configurationIdentity() == configuration else { return false }
                 if self.lastConnectionMode == connectionMode && serverIp == remoteServerIp && reachable == isRemoteServerIpReachable {
                     debugLog("[minimuxer] [iface] no remote server state changes detected, skipping refresh")
                     return false

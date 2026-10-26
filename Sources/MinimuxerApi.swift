@@ -84,6 +84,21 @@ public struct ConnectionConfigBinding: Sendable {
     }
 }
 
+// V3_OWNED_READINESS_TYPES_BEGIN
+public enum MinimuxerOwnedReadinessTransient: String, Sendable {
+    case wifiPending, vpnInterfacePending, peerAddressPending, peerProbePending
+}
+
+public struct MinimuxerOwnedReadinessObservation {
+    public let result: Result<Bool, MinimuxerError>
+    public let transient: MinimuxerOwnedReadinessTransient?
+    public init(result: Result<Bool, MinimuxerError>, transient: MinimuxerOwnedReadinessTransient? = nil) {
+        self.result = result
+        self.transient = transient
+    }
+}
+// V3_OWNED_READINESS_TYPES_END
+
 public protocol MinimuxerAPI: AnyObject {
     func beginTransportBatch() async
     func endTransportBatch() async
@@ -95,6 +110,7 @@ public protocol MinimuxerAPI: AnyObject {
     var statusPublisher: AnyPublisher<Result<Bool, MinimuxerError>, Never> { get }
     
     func getConnectionMode() async -> DeviceConnectionMode
+    func ownedNetworkReadinessProbe(withNetworkCheck: Bool) async -> MinimuxerOwnedReadinessObservation
     func isReady(withNetworkCheck: Bool, withDDIMountCheck: Bool) async -> Result<Bool, MinimuxerError>
     func describeError(_ error: MinimuxerError) -> String
     func bindConnectionConfig(_ binding: ConnectionConfigBinding) async
@@ -129,6 +145,12 @@ public protocol MinimuxerAPI: AnyObject {
 }
 
 public extension MinimuxerAPI {
+    // Network precondition only, never proof of device identity or permission.
+    // Compatibility implementations defer to the mandatory one-shot isReady.
+    func ownedNetworkReadinessProbe(withNetworkCheck: Bool) async -> MinimuxerOwnedReadinessObservation {
+        .init(result: .success(true))
+    }
+
     func start(pairingFile: String, mountPath: String, preferred: PairingProtocol? = nil) async throws {
         try await start(pairingFile: pairingFile, mountPath: mountPath, preferred: preferred)
     }

@@ -25,6 +25,9 @@ final internal class NetworkObserverService: NetworkObserverAPI, @unchecked Send
     private let monitor = NWPathMonitor()
     private let queue = DispatchQueue(label: "net.monitor")
     private let state = State()
+    private let endpointRefresh = EndpointRefreshTransaction()
+    private var publishedConfiguration: DeviceConnectionManager.ConfigurationIdentity?
+    private var publishedLifecycle: UInt64?
 
     init(
         connectionManager: DeviceConnectionManager,
@@ -38,6 +41,7 @@ final internal class NetworkObserverService: NetworkObserverAPI, @unchecked Send
     
     private actor State {
         var started = false
+        var lifecycle: UInt64 = 0
         var observationTask: Task<Void, Never>? = nil
         
         func with<T>(_ body: (isolated State) throws -> T) rethrows -> T {
@@ -53,7 +57,7 @@ final internal class NetworkObserverService: NetworkObserverAPI, @unchecked Send
             return false
         }
 
-        await state.with { $0.started = true }
+        await state.with { $0.lifecycle &+= 1; $0.started = true }
         verboseLog("[minimuxer] [net] monitor started")
 
         let paths = AsyncStream<NWPath> { [weak self] continuation in
@@ -89,19 +93,29 @@ final internal class NetworkObserverService: NetworkObserverAPI, @unchecked Send
     }
     
     func refreshEndpoint() async {
+        _ = await refreshEndpointValidated()
+    }
+
+    func refreshEndpointValidated() async -> Bool {
+        await endpointRefresh.run { [self] in await refreshEndpointTransaction() }
+    }
+
+    private func refreshEndpointTransaction() async -> Bool {
+        let lifecycle = await state.with { $0.lifecycle }
         let manager = self.connectionManager
         verboseLog("[minimuxer] [net] refreshing interfaces list and peers")
+        let configuration = await manager.configurationIdentity()
         let ifacesChanged = await manager.refresh()
+        guard await manager.configurationIdentity() == configuration,
+              await state.with({ $0.lifecycle }) == lifecycle else { return false }
         
-        guard ifacesChanged else {
-            return
-        }
+        if !ifacesChanged && publishedConfiguration == configuration && publishedLifecycle == lifecycle { return true }
         
         let connectionMode = await manager.getPreferredConnectionMode()
         switch connectionMode {
             case .notConfigured:
                 debugLog("[minimuxer] [net] connection mode not configured. skipping endpoint update...")
-                return
+                return true
                 
             case .localVPN:
                 verboseLog("[minimuxer] [net] retrive the first uTun vpn interface info")
@@ -127,18 +141,15 @@ final internal class NetworkObserverService: NetworkObserverAPI, @unchecked Send
 
                     if let peer = effectiveIp {
                         verboseLog("[minimuxer] [net] update device IP with effective tunnel peer: '\(effectivePeer)'")
-                        await self.endpoint.update(peer)
-                        self.proxyServer.notifyDeviceAttached(tunnelPeerIp: peer)
+                        guard await publishEndpoint(peer, configuration: configuration, lifecycle: lifecycle) else { return false }
                     } else {
                         verboseLog("[minimuxer] [net] peer not available for \(info.name)")
-                        await self.endpoint.clear()
-                        self.proxyServer.notifyDeviceDetached()
+                        guard await publishEndpoint(nil, configuration: configuration, lifecycle: lifecycle) else { return false }
                     }
 
                 } else {
                     verboseLog("[minimuxer] [net] no local VPN interface detected")
-                    await self.endpoint.clear()
-                    self.proxyServer.notifyDeviceDetached()
+                    guard await publishEndpoint(nil, configuration: configuration, lifecycle: lifecycle) else { return false }
                 }
             
             case .remoteServer:
@@ -150,23 +161,49 @@ final internal class NetworkObserverService: NetworkObserverAPI, @unchecked Send
                     
                     """)
                     if isReachable {
-                        await self.endpoint.update(remoteIp)
-                        self.proxyServer.notifyDeviceAttached(tunnelPeerIp: remoteIp)
+                        guard await publishEndpoint(remoteIp, configuration: configuration, lifecycle: lifecycle) else { return false }
                     } else {
-                        await self.endpoint.clear()
-                        self.proxyServer.notifyDeviceDetached()
+                        guard await publishEndpoint(nil, configuration: configuration, lifecycle: lifecycle) else { return false }
                     }
                 } else {
                     verboseLog("[minimuxer] [net] remote server endpoint unreachable")
-                    await self.endpoint.clear()
-                    self.proxyServer.notifyDeviceDetached()
+                    guard await publishEndpoint(nil, configuration: configuration, lifecycle: lifecycle) else { return false }
                 }
             }
+        guard await manager.configurationIdentity() == configuration,
+              await state.with({ $0.lifecycle }) == lifecycle else { return false }
+        publishedConfiguration = configuration
+        publishedLifecycle = lifecycle
+        return true
     }
     
+    private func publishEndpoint(_ peer: String?, configuration: DeviceConnectionManager.ConfigurationIdentity, lifecycle: UInt64) async -> Bool {
+        guard await connectionManager.configurationIdentity() == configuration,
+              await state.with({ $0.lifecycle }) == lifecycle else { return false }
+        if let peer { await endpoint.update(peer) } else { await endpoint.clear() }
+        guard await connectionManager.configurationIdentity() == configuration,
+              await state.with({ $0.lifecycle }) == lifecycle else {
+            await endpoint.clear()
+            proxyServer.notifyDeviceDetached()
+            return false
+        }
+        // Serialize the final synchronous notification against stop's epoch bump.
+        let published = await state.with { value in
+            guard value.lifecycle == lifecycle else { return false }
+            if let peer { self.proxyServer.notifyDeviceAttached(tunnelPeerIp: peer) }
+            else { self.proxyServer.notifyDeviceDetached() }
+            return true
+        }
+        if !published { await endpoint.clear() }
+        return published
+    }
+
     @discardableResult
     func stop() async -> Bool {
-        let isStarted = await state.with { $0.started }
+        let isStarted = await state.with { value in
+            value.lifecycle &+= 1 // Invalidate in-flight publication, not its other waiters.
+            return value.started
+        }
         guard isStarted else {
             verboseLog("[minimuxer] [net] monitor already stopped")
             return false

@@ -49,6 +49,10 @@ final class DeviceProvider: @unchecked Sendable {
         self.pendingConfiguration = nil
     }
 
+    var hasActiveOwnedBatch: Bool {
+        lock.withLock { activeBatches > endingBatches }
+    }
+
     func beginTransportBatch() async {
         let selected = lock.withLock {
             activeBatches += 1
