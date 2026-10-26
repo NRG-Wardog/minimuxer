@@ -5,11 +5,22 @@ ROOT=Path(__file__).resolve().parents[1]
 def section(text,start,end):
     assert text.count(start)==1
     return text.split(start,1)[1].split(end,1)[0]
+JOIN_ANCHOR = 'if let running { return await running.1.value }'
+JOIN_INSTRUMENTED = 'if let running { fixtureJoinSignal.signal(); return await running.1.value }'
+def observe_join(source):
+    # Fixture-only synchronous notification after the actual existing-task capture.
+    # No production declarations, decisions, await points or returns are replaced.
+    assert source.count(JOIN_ANCHOR) == 1 and JOIN_INSTRUMENTED not in source
+    instrumented = source.replace(JOIN_ANCHOR, JOIN_INSTRUMENTED, 1)
+    assert instrumented.count(JOIN_INSTRUMENTED) == 1
+    assert instrumented.replace(JOIN_INSTRUMENTED, JOIN_ANCHOR, 1) == source
+    return instrumented
+
 def generate():
     api=(ROOT/'Sources/MinimuxerApi.swift').read_text()
     core=(ROOT/'Sources/MinimuxerImpl.swift').read_text()
     net=(ROOT/'Sources/Services/NetworkObserverService.swift').read_text()
-    actor=(ROOT/'Sources/Services/EndpointRefreshTransaction.swift').read_text()
+    actor=observe_join((ROOT/'Sources/Services/EndpointRefreshTransaction.swift').read_text())
     types=section(api,'// V3_OWNED_READINESS_TYPES_BEGIN','// V3_OWNED_READINESS_TYPES_END')
     methods='    func isReady(withNetworkCheck:'+section(core,'    func isReady(withNetworkCheck:','    private func runWithChecks')
     transaction='    func refreshEndpoint()'+section(net,'    func refreshEndpoint()','    @discardableResult\n    func stop()')
@@ -22,6 +33,17 @@ def generate():
     fixture=(ROOT/'.ci/owned-readiness/fixture.swift').read_text()
     return fixture.replace('// TYPES',types).replace('// COALESCER',actor).replace('// CORE',methods).replace('// NETWORK\n',transaction+'\n').replace('// CONFIG_IDENTITY',identity).replace('// PROVIDER_OWNERSHIP',ownership).replace('// NETWORK_STATE',network_state).replace('// STOP',stop)
 class OwnedReadinessTests(unittest.TestCase):
+    def test_join_observation_is_one_reversible_fixture_only_insertion(self):
+        original=(ROOT/'Sources/Services/EndpointRefreshTransaction.swift').read_text()
+        transformed=observe_join(original)
+        self.assertEqual(transformed.replace(JOIN_INSTRUMENTED,JOIN_ANCHOR,1),original)
+        for mutant in (original+JOIN_ANCHOR,original.replace(JOIN_ANCHOR,'return false')):
+            with self.assertRaises(AssertionError):observe_join(mutant)
+        self.assertNotIn('fixtureJoinSignal',original)
+        fixture=(ROOT/'.ci/owned-readiness/fixture.swift').read_text()
+        self.assertIn('await fixtureJoinSignal.wait()',fixture)
+        self.assertNotIn('0..<100',fixture)
+
     def test_typed_guards_no_text_retry(self):
         s=(ROOT/'Sources/MinimuxerImpl.swift').read_text()
         self.assertEqual(s.count('transient: transientAllowed ?'),4)

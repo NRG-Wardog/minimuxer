@@ -8,6 +8,32 @@ enum Transport { case coreDevice,unavailable,lockdown }
 enum Cause { case missingRequiredVPNInterface,unsupportedBackend }
 struct Decision { var transport:Transport = .coreDevice; var reason="synthetic";var unavailableCause:Cause? }
 // TYPES
+// The only injected observation is synchronous and follows a captured running task.
+final class JoinSignal: @unchecked Sendable {
+    private let lock=NSLock()
+    private var signalled=false
+    private var waiter:CheckedContinuation<Void,Never>?
+    func signal() {
+        let continuation=lock.withLock { ()->CheckedContinuation<Void,Never>? in
+            signalled=true
+            defer {waiter=nil}
+            return waiter
+        }
+        continuation?.resume()
+    }
+    func wait() async {
+        await withCheckedContinuation { (continuation:CheckedContinuation<Void,Never>) in
+            let resume=lock.withLock { ()->Bool in
+                if signalled{return true}
+                precondition(waiter==nil)
+                waiter=continuation
+                return false
+            }
+            if resume{continuation.resume()}
+        }
+    }
+}
+let fixtureJoinSignal=JoinSignal()
 // COALESCER
 actor Endpoint {
     var value:String?="127.0.0.1"
@@ -91,12 +117,11 @@ actor Latch {var open=false;var waiters:[CheckedContinuation<Void,Never>]=[];fun
         while await stopped.network.connectionManager.refreshCount==0{await Task.yield()}
         _ = await stopped.network.stop();await scanLatch.release();expect(!(await pending.value) && stopped.network.proxyServer.attachments==0,"stop invalidates shared publication")
         await stopped.network.connectionManager.setGate(nil);await stopped.network.fixtureStart();expect(await stopped.network.refreshEndpointValidated(),"new lifecycle fresh publication")
-        let transaction=EndpointRefreshTransaction();let latch=Latch();let starts=Counter();let callers=Counter()
+        let transaction=EndpointRefreshTransaction();let latch=Latch();let starts=Counter()
         let first=Task {await transaction.run {await starts.increment();await latch.wait();return true}}
         while await starts.count==0 {await Task.yield()}
-        let second=Task {await callers.increment();return await transaction.run {await starts.increment();return false}}
-        while await callers.count==0 {await Task.yield()}
-        for _ in 0..<100 {await Task.yield()}
+        let second=Task {return await transaction.run {await starts.increment();return false}}
+        await fixtureJoinSignal.wait()
         second.cancel();await latch.release();expect(await first.value,"shared operation completes");expect(await second.value,"cancelled waiter does not cancel shared operation");expect(await starts.count==1,"concurrent scans coalesced")
         expect(await transaction.run {true},"completed transaction releases slot")
         print("OWNED_READINESS_SOURCE_RUNTIME_PASS no_device_execution=true")
