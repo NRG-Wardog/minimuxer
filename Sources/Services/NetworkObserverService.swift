@@ -9,6 +9,80 @@ import Network
 import Foundation
 import Combine
 
+// V3_LOCAL_VPN_WIFI_OBSERVATION_BEGIN
+// Local VPN admission asks whether a Wi-Fi-specific path is available, not
+// whether the default route currently uses Wi-Fi. No callback starts transport.
+final class LocalVPNWiFiObservation: @unchecked Sendable {
+    struct Snapshot {
+        let generation: UInt64
+        let observed: Bool
+        let status: String
+        let usesWiFi: Bool
+        var satisfied: Bool { observed && status == "satisfied" && usesWiFi }
+    }
+    private let lock = NSRecursiveLock()
+    private let queue = DispatchQueue(label: "net.local-vpn-wifi")
+    private var monitor: NWPathMonitor?
+    private var generation: UInt64 = 0
+    private var received = false
+
+    static func statusName(_ status: NWPath.Status) -> String {
+        switch status {
+        case .satisfied: return "satisfied"
+        case .unsatisfied: return "unsatisfied"
+        case .requiresConnection: return "requiresConnection"
+        @unknown default: return "unknown"
+        }
+    }
+
+    func start() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard monitor == nil else { return }
+        generation &+= 1
+        received = false
+        let token = generation
+        let next = NWPathMonitor(requiredInterfaceType: .wifi)
+        monitor = next
+        next.pathUpdateHandler = { [weak self] _ in self?.receivedUpdate(generation: token) }
+        // Network.framework delivers callbacks on queue, never inline here.
+        next.start(queue: queue)
+    }
+
+    private func receivedUpdate(generation token: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard monitor != nil, generation == token else { return }
+        received = true
+    }
+
+    func stop() {
+        lock.lock()
+        defer { lock.unlock() }
+        generation &+= 1
+        received = false
+        let previous = monitor
+        monitor = nil
+        previous?.pathUpdateHandler = nil
+        previous?.cancel()
+    }
+
+    func snapshot() -> Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let monitor, received else {
+            return Snapshot(generation: generation, observed: false, status: "unknown", usesWiFi: false)
+        }
+        // Never retain a prior true observation after the monitored path changes.
+        let path = monitor.currentPath
+        return Snapshot(generation: generation, observed: true,
+                        status: Self.statusName(path.status), usesWiFi: path.usesInterfaceType(.wifi))
+    }
+
+    deinit { stop() }
+}
+// V3_LOCAL_VPN_WIFI_OBSERVATION_END
+
 final internal class NetworkObserverService: NetworkObserverAPI, @unchecked Sendable {
 
     var onNetworkChanged: (() async -> Void)?
@@ -23,6 +97,7 @@ final internal class NetworkObserverService: NetworkObserverAPI, @unchecked Send
     let proxyServer: UsbmuxdProxyServer
 
     private let monitor = NWPathMonitor()
+    private let localVPNWiFi = LocalVPNWiFiObservation()
     private let queue = DispatchQueue(label: "net.monitor")
     private let state = State()
     private let endpointRefresh = EndpointRefreshTransaction()
@@ -51,13 +126,18 @@ final internal class NetworkObserverService: NetworkObserverAPI, @unchecked Send
 
     @discardableResult
     func start() async -> Bool {
-        let alreadyStarted = await state.with { $0.started }
-        guard !alreadyStarted else {
+        let admittedLifecycle = await state.with { value -> UInt64? in
+            guard !value.started else { return nil }
+            value.lifecycle &+= 1
+            value.started = true
+            localVPNWiFi.start()
+            return value.lifecycle
+        }
+        guard let admittedLifecycle else {
             verboseLog("[minimuxer] [net] monitor already started")
             return false
         }
 
-        await state.with { $0.lifecycle &+= 1; $0.started = true }
         verboseLog("[minimuxer] [net] monitor started")
 
         let paths = AsyncStream<NWPath> { [weak self] continuation in
@@ -79,7 +159,10 @@ final internal class NetworkObserverService: NetworkObserverAPI, @unchecked Send
                 await self?.handleNetworkChange()
             }
         }
-        await state.with { $0.observationTask = task }
+        await state.with { value in
+            guard value.started, value.lifecycle == admittedLifecycle else { task.cancel(); return }
+            value.observationTask = task
+        }
 
         return true
     }
@@ -200,26 +283,34 @@ final internal class NetworkObserverService: NetworkObserverAPI, @unchecked Send
 
     @discardableResult
     func stop() async -> Bool {
-        let isStarted = await state.with { value in
+        let stopped = await state.with { value -> (Bool, Task<Void, Never>?) in
             value.lifecycle &+= 1 // Invalidate in-flight publication, not its other waiters.
-            return value.started
+            localVPNWiFi.stop()
+            let wasStarted = value.started
+            value.started = false
+            let task = value.observationTask
+            value.observationTask = nil
+            return (wasStarted, task)
         }
-        guard isStarted else {
+        guard stopped.0 else {
             verboseLog("[minimuxer] [net] monitor already stopped")
             return false
         }
 
         self.monitor.cancel()
-        await state.with {
-            $0.observationTask?.cancel()
-            $0.observationTask = nil
-            $0.started = false
-        }
+        stopped.1?.cancel()
         
         verboseLog("[minimuxer] [net] monitor stopped")
         return true
     }
     
+    var localVPNWiFiSnapshot: LocalVPNWiFiObservation.Snapshot { localVPNWiFi.snapshot() }
+
+    func logReadinessWiFiObservation(_ local: LocalVPNWiFiObservation.Snapshot) {
+        let path = monitor.currentPath
+        debugLog("[V3_WIFI_READINESS] default_status=\(LocalVPNWiFiObservation.statusName(path.status)) default_wifi=\(path.usesInterfaceType(.wifi)) local_status=\(local.status) local_wifi=\(local.usesWiFi) local_observed=\(local.observed)")
+    }
+
     var isWifiSatisfied: Bool {
         let path = monitor.currentPath
         return path.status == .satisfied && path.usesInterfaceType(.wifi)

@@ -136,9 +136,12 @@ final internal class MinimuxerImpl: MinimuxerAPI {
     func ownedNetworkReadinessProbe(withNetworkCheck: Bool) async -> MinimuxerOwnedReadinessObservation {
         guard deviceProvider.hasActiveOwnedBatch, !Task.isCancelled else { return .init(result: .success(false)) }
         let configuration = await network.connectionManager.configurationIdentity()
+        let wifiGeneration = network.localVPNWiFiSnapshot.generation
         let result = await readinessObservation(withNetworkCheck: withNetworkCheck, withDDIMountCheck: false, owned: true, configuration: configuration)
         guard deviceProvider.hasActiveOwnedBatch, !Task.isCancelled,
-              await network.connectionManager.configurationIdentity() == configuration else {
+              await network.connectionManager.configurationIdentity() == configuration,
+              (!withNetworkCheck || configuration.mode != .localVPN ||
+               network.localVPNWiFiSnapshot.generation == wifiGeneration) else {
             return .init(result: .success(false))
         }
         return result
@@ -163,22 +166,38 @@ final internal class MinimuxerImpl: MinimuxerAPI {
             ownedMode == .localVPN && pairingFileType != .unknown &&
             (ownedDecision?.transport != .unavailable || ownedDecision?.unavailableCause == .missingRequiredVPNInterface)
 
-        // check connection status first
-        if withNetworkCheck && !(
-            self.network.isWifiSatisfied   /* ||
-            self.network.isWiredSatisfied     ||
-            self.network.isUsbSatisfied       ||
-            self.network.isBridgeSatisfied */
-        ){
+        // Preserve default-route semantics for other modes and public clients.
+        // Local VPN uses the same Wi-Fi-specific predicate as host preflight.
+        let readinessConfiguration = await network.connectionManager.configurationIdentity()
+        let connectionMode = readinessConfiguration.mode
+        let localWiFi = network.localVPNWiFiSnapshot
+        func localObservationFailure() async -> MinimuxerError? {
+            guard withNetworkCheck && connectionMode == .localVPN else { return nil }
+            let currentConfiguration = await network.connectionManager.configurationIdentity()
+            let currentWiFi = network.localVPNWiFiSnapshot
+            guard !Task.isCancelled, currentConfiguration == readinessConfiguration,
+                  currentWiFi.generation == localWiFi.generation else {
+                return .invalidVPN("Local VPN readiness configuration changed during observation.")
+            }
+            if withNetworkCheck && !currentWiFi.satisfied {
+                return .noConnection("No wifi interface satisfied")
+            }
+            return nil
+        }
+        let wifiSatisfied = connectionMode == .localVPN ? localWiFi.satisfied : network.isWifiSatisfied
+        if withNetworkCheck && connectionMode == .localVPN && owned {
+            network.logReadinessWiFiObservation(localWiFi)
+        }
+        if withNetworkCheck && !wifiSatisfied {
             debugLog("[minimuxer] minimuxer not ready: no network connection")
             return .init(result: .failure(.noConnection("No wifi interface satisfied")), transient: transientAllowed ? .wifiPending : nil)
         }
 
         // check connection mode
-        let connectionMode = await getConnectionMode()
         let net = self.network
 
         let decision = await configureRefreshTransport()
+        if let failure = await localObservationFailure() { return .init(result: .failure(failure)) }
         if decision.transport == .unavailable {
             // V3_LOCALVPN_INTERFACE_RECOVERY_V1: only the same policy snapshot
             // may produce noVPN. Configuration, pairing and backend failures
@@ -215,6 +234,7 @@ final internal class MinimuxerImpl: MinimuxerAPI {
         do {
             deviceIp = try await self.endpoint.ip()
         } catch {
+            if let failure = await localObservationFailure() { return .init(result: .failure(failure)) }
             switch connectionMode {
                 case .localVPN:
                     debugLog("[minimuxer] minimuxer not ready: tunnel peer IP not available despite tunnel iface being present")
@@ -227,7 +247,9 @@ final internal class MinimuxerImpl: MinimuxerAPI {
             }
         }
         
+        if let failure = await localObservationFailure() { return .init(result: .failure(failure)) }
         let peerReachable = testDeviceConnection(ifaddr: deviceIp)
+        if let failure = await localObservationFailure() { return .init(result: .failure(failure)) }
         if !peerReachable {
             switch connectionMode {
                 case .localVPN:
@@ -241,6 +263,7 @@ final internal class MinimuxerImpl: MinimuxerAPI {
             }
         }
 
+        if let failure = await localObservationFailure() { return .init(result: .failure(failure)) }
         if owned {
             guard deviceProvider.hasActiveOwnedBatch, !Task.isCancelled,
                   await network.connectionManager.configurationIdentity() == configuration else { return .init(result: .success(false)) }
@@ -256,6 +279,9 @@ final internal class MinimuxerImpl: MinimuxerAPI {
             return .init(result: .failure(error))
         }
 
+        // Await native initialization to completion; never detach or replay it
+        // if a local observation/configuration changes while it is in flight.
+        if let failure = await localObservationFailure() { return .init(result: .failure(failure)) }
         verboseLog(
             "minimuxer status (.\(activeProtocol)): " +
             "deviceUDID_present=\(!deviceUDID.isEmpty) " +
