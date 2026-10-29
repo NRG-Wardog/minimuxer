@@ -596,6 +596,18 @@ final internal class MinimuxerImpl: MinimuxerAPI {
         }
     }
 
+    // Read-only post-install observation. Capture the gateway before suspension;
+    // the caller retains its existing transport batch until this returns.
+    func readInstalledProvisioningProfiles() async throws(MinimuxerError) -> [Data] {
+        let capturedGateway = gateway
+        return try await runWithChecks("while reading installed profiles", catchAll: MinimuxerError.createMisagent) {
+            try Task.checkCancellation()
+            let profiles = try await capturedGateway.readInstalledProvisioningProfiles()
+            try Task.checkCancellation()
+            return profiles
+        }
+    }
+
     func dumpProfiles(docsPath: String, mode: ProfileDumpMode = .zip) async throws(MinimuxerError) -> String {
         try await runWithChecks("while dumping profiles", catchAll: MinimuxerError.createMisagent) {
             switch mode {

@@ -71,7 +71,8 @@ let package = Package(
                 "BaseDeviceGateway.swift",
                 "DeviceGatewayAPI.swift",
                 "DeviceGatewayError.swift",
-                "DeviceGatewayLogging.swift"
+                "DeviceGatewayLogging.swift",
+                "InstalledProfileReadback.swift"
             ]
         ),
 

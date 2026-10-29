@@ -137,6 +137,7 @@ public protocol MinimuxerAPI: AnyObject {
     func attachDebugger(pid: UInt32) async throws
     func installProvisioningProfile(profile: Data) async throws
     func removeProvisioningProfile(id: String) async throws
+    func readInstalledProvisioningProfiles() async throws -> [Data]
     func dumpProfiles(docsPath: String, mode: ProfileDumpMode) async throws -> String
 
     func afcListDirectory(bundleId: String, path: String) async throws -> [String]
@@ -145,6 +146,10 @@ public protocol MinimuxerAPI: AnyObject {
 }
 
 public extension MinimuxerAPI {
+    func readInstalledProvisioningProfiles() async throws -> [Data] {
+        throw MinimuxerError.createMisagent("installed_profile_readback_unsupported")
+    }
+
     // Network precondition only, never proof of device identity or permission.
     // Compatibility implementations defer to the mandatory one-shot isReady.
     func ownedNetworkReadinessProbe(withNetworkCheck: Bool) async -> MinimuxerOwnedReadinessObservation {

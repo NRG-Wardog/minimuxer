@@ -635,9 +635,7 @@ public final class LibimobiledeviceGateway: BaseDeviceGateway, DeviceGatewayAPI,
                 debugLog("[LibimobiledeviceGateway] Installing provisioning profile via RSD misagent...")
                 try rsdSendPlist(stream, dict: ["MessageType": "Install", "Profile": profile])
                 let resp = try rsdRecvPlist(stream)
-                if let status = resp["Status"] as? Int, status != 0 {
-                    throw LibimobiledeviceGatewayError(.serviceError, reason: "misagent install failed with status: \(status)")
-                }
+                try InstalledProfileReadback.requireSuccessStatus(resp)
                 debugLog("[LibimobiledeviceGateway] Provisioning profile installed successfully via RSD!")
             }
             return
@@ -1468,6 +1466,13 @@ extension LibimobiledeviceGateway {
         try await withFFIDispatch {
             try self.syncDebugProcess(pid: pid)
         }
+    }
+
+    public func readInstalledProvisioningProfiles() async throws -> [Data] {
+        // This backend exposes no whole connect/send/query native deadline.
+        // Existing installs and diagnostic exports remain available; verification
+        // must report unsupported instead of claiming a bounded/read-back result.
+        throw LibimobiledeviceGatewayError(.unsupportedOperation, reason: "installed_profile_readback")
     }
 
     public func dumpProfiles(docsPath: String) async throws -> String {

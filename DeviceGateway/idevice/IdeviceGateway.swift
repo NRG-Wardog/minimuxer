@@ -1682,6 +1682,87 @@ public final class IdeviceGateway: BaseDeviceGateway, DeviceGatewayAPI, @uncheck
         }
     }
 
+    // Provider construction is local parsing/allocation only, never network I/O.
+    // The bounded Rust transaction borrows it and drops its own client first.
+    private func withReadbackTCPProvider<T>(_ action: (OpaquePointer) throws -> T) throws -> T {
+        guard let endpoint = deviceEndpointIp, let pairingData = pairingFileData else {
+            throw IdeviceGatewayError(.notInitialized, reason: "profile_readback_transport_unavailable")
+        }
+        var pairing: OpaquePointer? = nil
+        let parseError = pairingData.withUnsafeBytes { bytes in
+            idevice_pairing_file_from_bytes(bytes.baseAddress?.assumingMemoryBound(to: UInt8.self), UInt(pairingData.count), &pairing)
+        }
+        if let parseError {
+            defer { idevice_error_free(parseError) }
+            throw IdeviceGatewayError(.serviceError, reason: "profile_readback_pairing_invalid")
+        }
+        guard let pairing else { throw IdeviceGatewayError(.serviceError, reason: "profile_readback_pairing_invalid") }
+        var pairingConsumed = false
+        defer { if !pairingConsumed { idevice_pairing_file_free(pairing) } }
+        var provider: OpaquePointer? = nil
+        let providerError = try withSockaddr(ip: endpoint, port: MinimuxerConstants.lockdowndPort) { address, _ in
+            address.withMemoryRebound(to: idevice_sockaddr.self, capacity: 1) { raw in
+                let error = idevice_tcp_provider_new(raw, pairing, MinimuxerConstants.appName, &provider)
+                // The paired Rust constructor consumes only after all fallible
+                // address/label checks succeed and returns nil on that path.
+                pairingConsumed = error == nil
+                return error
+            }
+        }
+        if let providerError {
+            defer { idevice_error_free(providerError) }
+            throw IdeviceGatewayError(.serviceError, reason: "profile_readback_provider_failed")
+        }
+        guard let provider else { throw IdeviceGatewayError(.serviceError, reason: "profile_readback_provider_failed") }
+        defer { idevice_provider_free(provider) }
+        return try action(provider)
+    }
+
+    private func syncReadInstalledProvisioningProfiles() throws -> [Data] {
+        try verifyInitialized()
+        guard batchCount > 0 else {
+            throw IdeviceGatewayError(.notInitialized, reason: "profile_readback_batch_unavailable")
+        }
+        var profiles: UnsafeMutablePointer<UnsafeMutablePointer<UInt8>?>? = nil
+        var lengths: UnsafeMutablePointer<Int>? = nil
+        var count = 0
+        let error: UnsafeMutablePointer<IdeviceFfiError>?
+        if pairingFileType == .rppairing || usesCoreDevice {
+            // The refresh already owns a prepared transport. Do not reconnect or
+            // create a tunnel during verification, especially after a mutation.
+            guard let adapter, let handshake else {
+                throw IdeviceGatewayError(.notInitialized, reason: "profile_readback_transport_unavailable")
+            }
+            error = misagent_read_profiles_rsd(adapter, handshake, &profiles, &lengths, &count)
+        } else {
+            error = try withReadbackTCPProvider { provider in
+                misagent_read_profiles(provider, &profiles, &lengths, &count)
+            }
+        }
+        if let error {
+            defer { idevice_error_free(error) }
+            throw IdeviceGatewayError(.serviceError, reason: "profile_readback_failed")
+        }
+        defer { misagent_free_profiles(profiles, lengths, count) }
+        guard count >= 0, count <= InstalledProfileReadback.maximumCount else {
+            throw IdeviceGatewayError(.serviceError, reason: "profile_readback_count_invalid")
+        }
+        if count == 0 { return [] }
+        guard let profiles, let lengths else {
+            throw IdeviceGatewayError(.serviceError, reason: "profile_readback_buffer_invalid")
+        }
+        var result: [Data] = []
+        var total = 0
+        for index in 0..<count {
+            try InstalledProfileReadback.validateLength(lengths[index], total: &total)
+            guard let bytes = profiles[index] else {
+                throw IdeviceGatewayError(.serviceError, reason: "profile_readback_buffer_invalid")
+            }
+            result.append(Data(bytes: bytes, count: lengths[index]))
+        }
+        return result
+    }
+
     private func syncDumpProfiles(docsPath: String) throws -> String {
         debugLog("[IdeviceGateway] dumpProfiles() called, docsPath: \(docsPath)")
         try verifyInitialized()
@@ -2779,6 +2860,17 @@ extension IdeviceGateway {
             defer { if self.batchCount == 0 { self.releaseTransport() } }
             return try self.syncDebugProcess(pid: pid)
         }
+    }
+
+    public func readInstalledProvisioningProfiles() async throws -> [Data] {
+        try Task.checkCancellation()
+        // Do not detach/abandon an in-flight FFI call or release its batch early.
+        let result = try await withFFIDispatch(on: self.ffiQueue) {
+            defer { if self.batchCount == 0 { self.releaseTransport() } }
+            return try self.syncReadInstalledProvisioningProfiles()
+        }
+        try Task.checkCancellation()
+        return result
     }
 
     public func dumpProfiles(docsPath: String) async throws -> String {

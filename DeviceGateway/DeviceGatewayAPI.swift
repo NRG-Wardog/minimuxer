@@ -52,6 +52,7 @@ public protocol DeviceGatewayAPI: AnyObject, Sendable {
 
     func installProvisioningProfile(profile: Data) async throws
     func removeProvisioningProfile(id: String) async throws
+    func readInstalledProvisioningProfiles() async throws -> [Data]
     func dumpProfiles(docsPath: String) async throws -> String
     func removeApp(bundleId: String) async throws
     func sendIpaAfc(bundleId: String, ipaBytes: Data) async throws
@@ -90,6 +91,11 @@ public protocol DeviceGatewayAPI: AnyObject, Sendable {
 }
 
 public extension DeviceGatewayAPI {
+    // Compatibility conformers must fail closed, never report an empty success.
+    func readInstalledProvisioningProfiles() async throws -> [Data] {
+        throw DeviceGatewayError(.unsupportedOperation, reason: "installed_profile_readback")
+    }
+
     var supportsCoreDeviceTransport: Bool { false }
     var coreDeviceTransportEnabled: Bool { false }
     var hasActiveTransportBatch: Bool { false }
