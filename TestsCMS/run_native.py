@@ -10,7 +10,16 @@ class Content(C.Structure):_fields_=[('bytes',C.c_void_p),('length',C.c_size_t)]
 checks=[]
 with tempfile.TemporaryDirectory(prefix='cms-native-') as temp:
  t=P(temp)
- def run(*argv):return subprocess.run([str(x) for x in argv],check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE).stdout
+ # install_dev intentionally omits OPENSSLDIR/openssl.cnf. Synthetic requests
+ # own their minimal config instead of inheriting ambient or global policy.
+ request_config=t/'request.cnf'
+ request_config.write_text('[req]\ndistinguished_name=dn\n[dn]\n')
+ # Mandatory behavioral regression: CLI fixture generation cannot accidentally
+ # recover an ambient default config if an explicit req -config is removed.
+ cli_environment=dict(os.environ,OPENSSL_CONF=str(t/'absent-default.cnf'))
+ def run(*argv):
+  environment=cli_environment if argv[0]==openssl else None
+  return subprocess.run([str(x) for x in argv],env=environment,check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE).stdout
  libs={}
  version_source=t/'version.c'
  version_source.write_text('#include <openssl/crypto.h>\n#include <openssl/opensslv.h>\n'+('' if args.development else '_Static_assert(OPENSSL_VERSION_MAJOR == 3 && OPENSSL_VERSION_MINOR == 5 && OPENSSL_VERSION_PATCH == 9, "Exact headers required");\n')+'const char *v3_qualification_linked_version(void) { return OpenSSL_version(0); }\n')
@@ -44,7 +53,7 @@ with tempfile.TemporaryDirectory(prefix='cms-native-') as temp:
   lib.v3_profile_cms_content_free(C.byref(out));assert not out.bytes and not out.length
   return status,payload
  def req(name,cn):
-  run(openssl,'req','-new','-newkey','rsa:2048','-nodes','-subj','/CN='+cn,'-keyout',t/(name+'.key'),'-out',t/(name+'.csr'))
+  run(openssl,'req','-config',request_config,'-new','-newkey','rsa:2048','-nodes','-subj','/CN='+cn,'-keyout',t/(name+'.key'),'-out',t/(name+'.csr'))
  def issue(name,issuer,start,end,ca=False):
   db=t/(name+'.db');db.write_text('');serial=t/(name+'.serial');serial.write_text('01\n')
   conf=t/(name+'.cnf');conf.write_text(f'''[ca]
@@ -70,7 +79,7 @@ authorityKeyIdentifier=keyid:always
   return run(openssl,'x509','-in',t/(name+'.pem'),'-outform','DER')
  now=dt.datetime.now(dt.timezone.utc);fmt=lambda v:v.strftime('%Y%m%d%H%M%SZ');before=fmt(now-dt.timedelta(days=1));after=fmt(now+dt.timedelta(days=2))
  req('root','Synthetic CMS test root')
- run(openssl,'req','-x509','-new','-key',t/'root.key','-subj','/CN=Synthetic CMS test root','-days','3','-sha256','-addext','basicConstraints=critical,CA:TRUE,pathlen:1','-addext','keyUsage=critical,keyCertSign,cRLSign','-addext','subjectKeyIdentifier=hash','-out',t/'root.pem')
+ run(openssl,'req','-config',request_config,'-x509','-new','-key',t/'root.key','-subj','/CN=Synthetic CMS test root','-days','3','-sha256','-addext','basicConstraints=critical,CA:TRUE,pathlen:1','-addext','keyUsage=critical,keyCertSign,cRLSign','-addext','subjectKeyIdentifier=hash','-out',t/'root.pem')
  anchor=run(openssl,'x509','-in',t/'root.pem','-outform','DER')
  req('issuer','Apple iPhone Certification Authority');issue('issuer','root',before,after,True)
  req('leaf','Apple iPhone OS Provisioning Profile Signing');pin=issue('leaf','issuer',before,after)
