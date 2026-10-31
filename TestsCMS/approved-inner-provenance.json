@@ -1,0 +1,22 @@
+[
+  {
+    "fixture": "APS_Development_Environment_Profile.mobileprovision.inner.cms",
+    "leaf_sha256": "e4d21aefaaf8b505f7efca69c0b8e9481e457df93bd0283dbb0fc27925e41d82",
+    "not_before": "2024-01-29 16:47:04+00:00",
+    "not_after": "2028-02-27 16:47:03+00:00",
+    "der_bytes": 779,
+    "source_commit": "410dc42e09f1bfca3258d46d5ec95cf48903d1b2",
+    "source_url": "https://raw.githubusercontent.com/dotnet/macios/410dc42e09f1bfca3258d46d5ec95cf48903d1b2/tests/msbuild/Xamarin.MacDev.Tasks.Tests/Resources/APS_Development_Environment_Profile.mobileprovision",
+    "outer_fixture_sha256": "db6376c04478b62cd2d395f608f6dcc7460e9025d91d3f2e2c10d4cb642d6493"
+  },
+  {
+    "fixture": "Apple_Signin_Test_Profile.mobileprovision.inner.cms",
+    "leaf_sha256": "7295adb4eeee9444b0897c2c0fcb45d7c5dc80fff8d7225426ec9d22bbfc3487",
+    "not_before": "2024-11-20 03:20:45+00:00",
+    "not_after": "2028-12-14 18:00:30+00:00",
+    "der_bytes": 779,
+    "source_commit": "410dc42e09f1bfca3258d46d5ec95cf48903d1b2",
+    "source_url": "https://raw.githubusercontent.com/dotnet/macios/410dc42e09f1bfca3258d46d5ec95cf48903d1b2/tests/msbuild/Xamarin.MacDev.Tasks.Tests/Resources/Apple_Signin_Test_Profile.mobileprovision",
+    "outer_fixture_sha256": "a4d867cac0d644f7a1d40781d39f736695778c1a369d92fd812e700cf3d42842"
+  }
+]

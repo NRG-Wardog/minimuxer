@@ -65,7 +65,8 @@ let package = Package(
             path: ".",
             exclude: [
                 "idevice",
-                "libimobiledevice"
+                "libimobiledevice",
+                "ProvisioningCMSCore"
             ],
             sources: [
                 "BaseDeviceGateway.swift",
@@ -87,6 +88,14 @@ let package = Package(
             path: "idevice"
         ),
 
+        // C-only CMS verifier, using the existing pinned OpenSSL product.
+        .target(
+            name: "ProvisioningCMSCore",
+            dependencies: [.product(name: "OpenSSL", package: "RemotePairingKit")],
+            path: "ProvisioningCMSCore",
+            publicHeadersPath: "include"
+        ),
+
         // Dynamic Libimobiledevice Target
         .target(
             name: "LibimobiledeviceGateway",
@@ -94,6 +103,7 @@ let package = Package(
                 "DeviceGatewayAPI",
                 .product(name: "MinimuxerCommon", package: "Common"),
                 "libimobiledevice",
+                "ProvisioningCMSCore",
                 .product(name: "OpenSSL",   package: "RemotePairingKit"),
                 .product(name: "RPPairing", package: "RemotePairingKit")
             ],
