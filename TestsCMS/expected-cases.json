@@ -7,6 +7,16 @@
     "production_rejects_synthetic_outer",
     "production_rejects_unknown_inner_pin",
     "test_rejects_wrong_inner_pin",
+    "diagnostic_unknown_pin_verified_hash_not_authority",
+    "diagnostic_verified_finite_role_observations",
+    "diagnostic_wrong_root_no_hash_unchecked_time_signature",
+    "diagnostic_bad_signature_no_hash",
+    "diagnostic_bad_content_digest_no_hash",
+    "diagnostic_malformed_resets_evidence",
+    "diagnostic_unsupported_algorithm_no_hash",
+    "diagnostic_profile_markers_are_not_authority",
+    "diagnostic_app_developer_distinct_not_authority",
+    "diagnostic_untrusted_role_markers_not_disclosed",
     "signature_tamper_rejected",
     "content_tamper_rejected",
     "trailing_data_rejected",
@@ -16,8 +26,10 @@
     "unsupported_digest_rejected",
     "sha1_not_inner_authority",
     "sha1_only_legacy_envelope",
+    "diagnostic_expired_time_no_hash",
     "expired_inner_time_rejected",
     "expired_legacy_documented_no_time",
+    "diagnostic_future_time_no_hash",
     "future_inner_time_rejected",
     "future_legacy_documented_no_time",
     "reordered_certificates_same_authority",
@@ -30,5 +42,5 @@
     "empty_input_rejected",
     "oversized_input_rejected"
   ],
-  "count": 28
+  "count": 40
 }

@@ -6,7 +6,58 @@ public enum GatewayProfileCMSVerificationError: Error {
     case unsupportedSigner, signerTimeInvalid, verificationFailed, unsupportedRepresentation
 }
 
+/// Observations only: neither this evidence nor its fingerprint grants authority.
+public struct GatewayProfileCMSSignerEvidence {
+    public enum Check: String { case unchecked, passed, failed }
+    public let algorithmAndAttributes: Check
+    public let pin: Check
+    public let chain: Check
+    public let temporal: Check
+    public let signature: Check
+    /// Only observed when chain, temporal and signature are passed; otherwise false means unchecked.
+    public let profileSubjectMarker: Bool
+    public let profileIssuerMarker: Bool
+    public let profileExtensionMarker: Bool
+    public let appDeveloperMarker: Bool
+    /// Public CMS signer certificate DER digest, never an app DeveloperCertificate.
+    /// Present only after pinned-root/current-chain and CMS verification succeed.
+    public let signerSHA256: String?
+
+    fileprivate init(_ raw: v3_cms_signer_evidence) {
+        func check(_ value: v3_cms_check) -> Check {
+            switch value {
+            case V3_CMS_PASSED: return .passed
+            case V3_CMS_FAILED: return .failed
+            default: return .unchecked
+            }
+        }
+        algorithmAndAttributes = check(raw.algorithm_and_attributes)
+        pin = check(raw.pin)
+        chain = check(raw.chain)
+        temporal = check(raw.temporal)
+        signature = check(raw.signature)
+        profileSubjectMarker = raw.profile_subject_marker != 0
+        profileIssuerMarker = raw.profile_issuer_marker != 0
+        profileExtensionMarker = raw.profile_extension_marker != 0
+        appDeveloperMarker = raw.app_developer_marker != 0
+        var digest = raw.signer_sha256
+        signerSHA256 = raw.fingerprint_valid == 1 ? withUnsafeBytes(of: &digest) {
+            $0.map { String(format: "%02x", $0) }.joined()
+        } : nil
+    }
+}
+
 public enum GatewayProfileCMSVerifier {
+    /// Diagnostic-only. Returns no profile content and cannot authorize renewal.
+    public static func diagnoseInnerSigner(_ data: Data) -> GatewayProfileCMSSignerEvidence {
+        var evidence = v3_cms_signer_evidence()
+        data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+            v3_profile_cms_diagnose_inner(bytes.bindMemory(to: UInt8.self).baseAddress,
+                                        bytes.count, &evidence)
+        }
+        return GatewayProfileCMSSignerEvidence(evidence)
+    }
+
     /// Legacy envelope authentication alone is not preservation authority.
     public static func authenticateOuter(_ data: Data) throws -> Data {
         try authenticate(data, inner: false)

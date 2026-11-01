@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Standard-library-only actual C qualification with the existing pinned OpenSSL CLI."""
+from diagnostic_support import diagnose
+import hashlib
 import argparse, ctypes as C, datetime as dt, json, os, pathlib, subprocess, tempfile
 P=pathlib.Path
 parser=argparse.ArgumentParser();parser.add_argument('--openssl-root',required=True);parser.add_argument('--output',required=True);parser.add_argument('--development',action='store_true');parser.add_argument('--openssl-cli');args=parser.parse_args()
@@ -40,7 +42,7 @@ with tempfile.TemporaryDirectory(prefix='cms-native-') as temp:
  def check(name,ok):
   if not ok:raise AssertionError(name)
   checks.append(name)
- check('production_has_no_injected_trust_exports',not hasattr(libs['production'],'v3_test_cms_authenticate') and not hasattr(libs['production'],'v3_test_inner_authenticate'))
+ check('production_has_no_injected_trust_exports',not hasattr(libs['production'],'v3_test_cms_authenticate') and not hasattr(libs['production'],'v3_test_inner_authenticate') and not hasattr(libs['production'],'v3_test_cms_diagnose_inner'))
  def verify(data,inner=False,anchor=None,pin=None):
   out=Content();buf=C.create_string_buffer(data);lib=libs['production'] if anchor is None else test
   if anchor is None:status=getattr(lib,'v3_profile_cms_verify_pinned_inner' if inner else 'v3_profile_cms_verify_legacy_outer')(buf,len(data),C.byref(out))
@@ -54,7 +56,7 @@ with tempfile.TemporaryDirectory(prefix='cms-native-') as temp:
   return status,payload
  def req(name,cn):
   run(openssl,'req','-config',request_config,'-new','-newkey','rsa:2048','-nodes','-subj','/CN='+cn,'-keyout',t/(name+'.key'),'-out',t/(name+'.csr'))
- def issue(name,issuer,start,end,ca=False):
+ def issue(name,issuer,start,end,ca=False,marker=None):
   db=t/(name+'.db');db.write_text('');serial=t/(name+'.serial');serial.write_text('01\n')
   conf=t/(name+'.cnf');conf.write_text(f'''[ca]
 default_ca=c
@@ -74,6 +76,7 @@ basicConstraints=critical,CA:{'TRUE,pathlen:0' if ca else 'FALSE'}
 keyUsage=critical,{'keyCertSign,cRLSign' if ca else 'digitalSignature'}
 subjectKeyIdentifier=hash
 authorityKeyIdentifier=keyid:always
+{marker + "=DER:05:00" if marker else ""}
 ''')
   run(openssl,'ca','-batch','-notext','-config',conf,'-in',t/(name+'.csr'),'-out',t/(name+'.pem'),'-startdate',start,'-enddate',end)
   return run(openssl,'x509','-in',t/(name+'.pem'),'-outform','DER')
@@ -84,14 +87,38 @@ authorityKeyIdentifier=keyid:always
  req('issuer','Apple iPhone Certification Authority');issue('issuer','root',before,after,True)
  req('leaf','Apple iPhone OS Provisioning Profile Signing');pin=issue('leaf','issuer',before,after)
  payload=b'bounded synthetic profile authority';(t/'payload').write_bytes(payload)
- def sign(name='leaf',digest='sha256',options=()):
-  return run(openssl,'cms','-sign','-binary','-in',t/'payload','-signer',t/(name+'.pem'),'-inkey',t/(name+'.key'),'-certfile',t/'issuer.pem','-md',digest,'-outform','DER',*options)
+ def sign(name='leaf',digest='sha256',options=(),chain_name='issuer'):
+  return run(openssl,'cms','-sign','-binary','-in',t/'payload','-signer',t/(name+'.pem'),'-inkey',t/(name+'.key'),'-certfile',t/(chain_name+'.pem'),'-md',digest,'-outform','DER',*options)
  valid=sign(options=('-nodetach',))
  check('test_legacy_chain_and_math',verify(valid,anchor=anchor)==(0,payload))
  check('test_inner_exact_pin_chain_and_math',verify(valid,True,anchor,pin)==(0,payload))
  check('production_rejects_synthetic_outer',verify(valid)[0]==3)
  check('production_rejects_unknown_inner_pin',verify(valid,True)[0]==6)
  check('test_rejects_wrong_inner_pin',verify(valid,True,anchor,anchor)[0]==6)
+ e=diagnose(test,valid,anchor,anchor)
+ check('diagnostic_unknown_pin_verified_hash_not_authority',(e.pin,e.chain,e.temporal,e.signature,e.fingerprint_valid)==(2,1,1,1,1) and bytes(e.signer_sha256)==hashlib.sha256(pin).digest() and verify(valid,True,anchor,anchor)==(6,None))
+ check('diagnostic_verified_finite_role_observations',not e.profile_subject_marker and not e.profile_issuer_marker and not e.profile_extension_marker and not e.app_developer_marker)
+ e=diagnose(libs['production'],valid)
+ check('diagnostic_wrong_root_no_hash_unchecked_time_signature',(e.pin,e.chain,e.temporal,e.signature,e.fingerprint_valid)==(2,2,0,0,0))
+ e=diagnose(test,valid[:-1]+bytes([valid[-1]^1]),anchor,anchor)
+ check('diagnostic_bad_signature_no_hash',(e.chain,e.temporal,e.signature,e.fingerprint_valid)==(1,1,2,0))
+ e=diagnose(test,valid.replace(payload,b'X'+payload[1:]),anchor,anchor)
+ check('diagnostic_bad_content_digest_no_hash',(e.chain,e.temporal,e.signature,e.fingerprint_valid)==(1,1,2,0))
+ e=diagnose(libs['production'],b'not CMS')
+ check('diagnostic_malformed_resets_evidence',bytes(e)==b'\0'*C.sizeof(e))
+ e=diagnose(test,sign(digest='sha224',options=('-nodetach',)),anchor,anchor)
+ check('diagnostic_unsupported_algorithm_no_hash',(e.algorithm_and_attributes,e.chain,e.temporal,e.signature,e.fingerprint_valid)==(2,0,0,0,0))
+ req('profileissuer','Apple System Integration CA 4');issue('profileissuer','root',before,after,True)
+ req('profilesigner','WWDR Provisioning Profile Signing');issue('profilesigner','profileissuer',before,after,marker='1.2.840.113635.100.12.19')
+ profilecms=sign('profilesigner',options=('-nodetach',),chain_name='profileissuer')
+ e=diagnose(test,profilecms,anchor,anchor)
+ check('diagnostic_profile_markers_are_not_authority',(e.profile_subject_marker,e.profile_issuer_marker,e.profile_extension_marker,e.app_developer_marker)==(1,1,1,0) and e.fingerprint_valid==1 and verify(profilecms,True,anchor,anchor)==(6,None))
+ req('developer','Synthetic app development signer');issue('developer','profileissuer',before,after,marker='1.2.840.113635.100.6.1.2')
+ developercms=sign('developer',options=('-nodetach',),chain_name='profileissuer')
+ e=diagnose(test,developercms,anchor,anchor)
+ check('diagnostic_app_developer_distinct_not_authority',(e.profile_subject_marker,e.profile_issuer_marker,e.profile_extension_marker,e.app_developer_marker)==(0,1,0,1) and e.fingerprint_valid==1 and verify(developercms,True,anchor,anchor)==(6,None))
+ e=diagnose(libs['production'],profilecms)
+ check('diagnostic_untrusted_role_markers_not_disclosed',not any([e.profile_subject_marker,e.profile_issuer_marker,e.profile_extension_marker,e.app_developer_marker,e.fingerprint_valid]))
  check('signature_tamper_rejected',verify(valid[:-1]+bytes([valid[-1]^1]),True,anchor,pin)[0]==4)
  check('content_tamper_rejected',verify(valid.replace(payload,b'X'+payload[1:]),True,anchor,pin)[0]==4)
  check('trailing_data_rejected',verify(valid+b'X',True,anchor,pin)[0]==1)
@@ -103,6 +130,8 @@ authorityKeyIdentifier=keyid:always
  check('sha1_only_legacy_envelope',verify(sign(digest='sha1',options=('-nodetach',)),anchor=anchor)==(0,payload))
  for label,lo,hi in [('expired',now-dt.timedelta(days=3),now-dt.timedelta(days=2)),('future',now+dt.timedelta(days=1),now+dt.timedelta(days=2))]:
   req(label,'Apple iPhone OS Provisioning Profile Signing');newpin=issue(label,'issuer',fmt(lo),fmt(hi));cms=sign(label,options=('-nodetach',))
+  e=diagnose(test,cms,anchor,anchor)
+  check('diagnostic_'+label+'_time_no_hash',(e.chain,e.temporal,e.signature,e.fingerprint_valid)==(2,2,0,0))
   check(label+'_inner_time_rejected',verify(cms,True,anchor,newpin)[0]==7)
   check(label+'_legacy_documented_no_time',verify(cms,anchor=anchor)==(0,payload))
  # Rewrite only bounded synthetic DER to exercise adversarial cert/SID inventory.

@@ -126,10 +126,11 @@ done: X509_STORE_CTX_free(ctx); return ok;
 }
 static v3_cms_status authenticate(const uint8_t *data,size_t length,
  const uint8_t *test_root,size_t test_root_length, cms_role role,
- const uint8_t *test_pin,size_t test_pin_length,v3_cms_content *result) {
+ const uint8_t *test_pin,size_t test_pin_length,v3_cms_content *result, v3_cms_signer_evidence *evidence) {
  v3_cms_status status=V3_CMS_MALFORMED;
  CMS_ContentInfo *cms=NULL; STACK_OF(X509) *certs=NULL,*only_signer=NULL;
  X509_STORE *store=NULL; BIO *verified=NULL;
+ if(evidence) memset(evidence,0,sizeof(*evidence));
  if(!result) return V3_CMS_MALFORMED;
  result->bytes=NULL; result->length=0;
  if(!data || !length || length>MAX_CMS_BYTES || length>LONG_MAX) return V3_CMS_RESOURCE;
@@ -161,10 +162,12 @@ static v3_cms_status authenticate(const uint8_t *data,size_t length,
  if(CMS_set1_signers_certs(cms,certs,0)!=1) goto done;
  X509 *signer=NULL;
  CMS_SignerInfo_get0_algs(si,NULL,&signer,NULL,NULL);
- if(!signer || !permitted_signer(si,signer,role)) { status=V3_CMS_UNSUPPORTED; goto done; }
- if(role==PINNED_INNER && !approved_inner(signer,test_pin,test_pin_length)) {
-  status=V3_CMS_UNSUPPORTED_SIGNER; goto done;
- }
+ int algorithms_ok=signer && permitted_signer(si,signer,role);
+ if(evidence) evidence->algorithm_and_attributes=algorithms_ok ? V3_CMS_PASSED : V3_CMS_FAILED;
+ if(!algorithms_ok) { status=V3_CMS_UNSUPPORTED; goto done; }
+ int pin_ok=role!=PINNED_INNER || approved_inner(signer,test_pin,test_pin_length);
+ if(evidence) evidence->pin=pin_ok ? V3_CMS_PASSED : V3_CMS_FAILED;
+ if(!pin_ok && !evidence) { status=V3_CMS_UNSUPPORTED_SIGNER; goto done; }
  store=X509_STORE_new(); if(!store) { status=V3_CMS_RESOURCE; goto done; }
  int roots_ok=0;
 #ifdef V3_CMS_TESTING
@@ -175,13 +178,39 @@ static v3_cms_status authenticate(const uint8_t *data,size_t length,
  roots_ok=production_roots(store,role);
  if(!roots_ok) { status=V3_CMS_UNTRUSTED; goto done; }
  status=verify_chain(store,signer,certs,role,test_pin,test_pin_length);
+ if(evidence) {
+  evidence->chain=status==V3_CMS_OK ? V3_CMS_PASSED :
+   (status==V3_CMS_RESOURCE ? V3_CMS_UNCHECKED : V3_CMS_FAILED);
+  evidence->temporal=status==V3_CMS_OK ? V3_CMS_PASSED :
+   (status==V3_CMS_SIGNER_TIME_INVALID ? V3_CMS_FAILED : V3_CMS_UNCHECKED);
+ }
  if(status!=V3_CMS_OK) goto done;
  only_signer=sk_X509_new_null(); verified=BIO_new(BIO_s_mem());
  if(!only_signer || !verified || !sk_X509_push(only_signer,signer)) { status=V3_CMS_RESOURCE; goto done; }
  /* Trust is already mandatory and pinned above. Only that signer may be used.
     Never skip CMS signature, signed attributes, or content-digest verification. */
  if(CMS_verify(cms,only_signer,NULL,NULL,verified,
-    CMS_BINARY|CMS_NOINTERN|CMS_NO_SIGNER_CERT_VERIFY)!=1) { status=V3_CMS_BAD_SIGNATURE; goto done; }
+    CMS_BINARY|CMS_NOINTERN|CMS_NO_SIGNER_CERT_VERIFY)!=1) {
+  if(evidence) evidence->signature=V3_CMS_FAILED;
+  status=V3_CMS_BAD_SIGNATURE; goto done;
+ }
+ if(evidence) {
+  evidence->signature=V3_CMS_PASSED;
+  unsigned int digest_length=0;
+  if(X509_digest(signer,EVP_sha256(),evidence->signer_sha256,&digest_length)==1 && digest_length==32) {
+   evidence->fingerprint_valid=1;
+  } else memset(evidence->signer_sha256,0,sizeof(evidence->signer_sha256));
+  evidence->profile_subject_marker=exact_cn(X509_get_subject_name(signer),"WWDR Provisioning Profile Signing");
+  evidence->profile_issuer_marker=exact_cn(X509_get_issuer_name(signer),"Apple System Integration CA 4");
+  /* Presence observations, NOT role authorization. No arbitrary OID output. */
+  ASN1_OBJECT *profile_oid=OBJ_txt2obj("1.2.840.113635.100.12.19",1);
+  ASN1_OBJECT *developer_oid=OBJ_txt2obj("1.2.840.113635.100.6.1.2",1);
+  evidence->profile_extension_marker=profile_oid && X509_get_ext_by_OBJ(signer,profile_oid,-1)>=0;
+  evidence->app_developer_marker=developer_oid && X509_get_ext_by_OBJ(signer,developer_oid,-1)>=0;
+  ASN1_OBJECT_free(profile_oid); ASN1_OBJECT_free(developer_oid);
+  /* Diagnostics NEVER reach content allocation, even for an approved pin. */
+  status=pin_ok ? V3_CMS_OK : V3_CMS_UNSUPPORTED_SIGNER; goto done;
+ }
  char *bytes=NULL; long n=BIO_get_mem_data(verified,&bytes);
  if(n<=0 || (size_t)n>MAX_CONTENT_BYTES) { status=V3_CMS_RESOURCE; goto done; }
  result->bytes=malloc((size_t)n); if(!result->bytes) { status=V3_CMS_RESOURCE; goto done; }
@@ -193,10 +222,10 @@ done:
  return status;
 }
 v3_cms_status v3_profile_cms_verify_legacy_outer(const uint8_t *data,size_t n,v3_cms_content *out) {
- return authenticate(data,n,NULL,0,LEGACY_OUTER,NULL,0,out);
+ return authenticate(data,n,NULL,0,LEGACY_OUTER,NULL,0,out,NULL);
 }
 v3_cms_status v3_profile_cms_verify_pinned_inner(const uint8_t *data,size_t n,v3_cms_content *out) {
- return authenticate(data,n,NULL,0,PINNED_INNER,NULL,0,out);
+ return authenticate(data,n,NULL,0,PINNED_INNER,NULL,0,out,NULL);
 }
 void v3_profile_cms_content_free(v3_cms_content *result) {
  if(result) { free(result->bytes); result->bytes=NULL; result->length=0; }
@@ -204,13 +233,31 @@ void v3_profile_cms_content_free(v3_cms_content *result) {
 #ifdef V3_CMS_TESTING
 v3_cms_status v3_test_cms_authenticate(const uint8_t *data,size_t n,const uint8_t *root,size_t root_n,v3_cms_content *out) {
  if(!root) { if(out){out->bytes=NULL;out->length=0;} return V3_CMS_UNTRUSTED; }
- return authenticate(data,n,root,root_n,LEGACY_OUTER,NULL,0,out);
+ return authenticate(data,n,root,root_n,LEGACY_OUTER,NULL,0,out,NULL);
 }
 #endif
 
 #ifdef V3_CMS_TESTING
 v3_cms_status v3_test_inner_authenticate(const uint8_t *data,size_t n,const uint8_t *root,size_t root_n,const uint8_t *pin,size_t pin_n,v3_cms_content *out) {
  if(!root || !pin || !pin_n || pin_n>MAX_CERT_BYTES) { if(out){out->bytes=NULL;out->length=0;} return V3_CMS_UNTRUSTED; }
- return authenticate(data,n,root,root_n,PINNED_INNER,pin,pin_n,out);
+ return authenticate(data,n,root,root_n,PINNED_INNER,pin,pin_n,out,NULL);
+}
+#endif
+
+void v3_profile_cms_diagnose_inner(const uint8_t *data,size_t n,v3_cms_signer_evidence *evidence) {
+ if(!evidence) return;
+ v3_cms_content out={NULL,0};
+ (void)authenticate(data,n,NULL,0,PINNED_INNER,NULL,0,&out,evidence);
+ v3_profile_cms_content_free(&out);
+}
+#ifdef V3_CMS_TESTING
+void v3_test_cms_diagnose_inner(const uint8_t *data,size_t n,const uint8_t *root,size_t root_n,
+ const uint8_t *pin,size_t pin_n,v3_cms_signer_evidence *evidence) {
+ if(!evidence) return;
+ memset(evidence,0,sizeof(*evidence));
+ if(!root || !pin || !pin_n || pin_n>MAX_CERT_BYTES) return;
+ v3_cms_content out={NULL,0};
+ (void)authenticate(data,n,root,root_n,PINNED_INNER,pin,pin_n,&out,evidence);
+ v3_profile_cms_content_free(&out);
 }
 #endif

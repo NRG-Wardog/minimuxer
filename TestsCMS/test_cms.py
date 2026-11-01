@@ -1,3 +1,4 @@
+from diagnostic_support import diagnose
 from pathlib import Path
 import ctypes as C, datetime as dt, hashlib, json, unittest, sys, os, subprocess, tempfile
 from cryptography import x509
@@ -133,6 +134,29 @@ class PinnedInner(unittest.TestCase):
   data=sign(self.payload,self.leaf,self.lk,[self.issuer],digest=hashes.SHA224());self.assertEqual(verify(data,self.anchor,True,self.pin)[0],2)
  def test_inner_signature_tamper_rejected(self):
   data=self.cms[:-1]+bytes([self.cms[-1]^1]);self.assertEqual(verify(data,self.anchor,True,self.pin)[0],4)
+ def test_diagnostic_unknown_pin_never_authorizes(self):
+  e=diagnose(test,self.cms,self.anchor,self.anchor)
+  self.assertEqual((e.pin,e.chain,e.temporal,e.signature,e.fingerprint_valid),(2,1,1,1,1))
+  self.assertEqual(bytes(e.signer_sha256),hashlib.sha256(self.pin).digest())
+  self.assertEqual(verify(self.cms,self.anchor,True,self.anchor),(6,None))
+ def test_diagnostic_wrong_root_does_not_disclose(self):
+  e=diagnose(prod,self.cms)
+  self.assertEqual((e.pin,e.chain,e.temporal,e.signature,e.fingerprint_valid),(2,2,0,0,0))
+ def test_diagnostic_tamper_does_not_disclose(self):
+  for changed in [self.cms[:-1]+bytes([self.cms[-1]^1]),self.cms.replace(self.payload,b'X'+self.payload[1:])]:
+   e=diagnose(test,changed,self.anchor,self.anchor)
+   self.assertEqual((e.chain,e.temporal,e.signature,e.fingerprint_valid),(1,1,2,0))
+ def test_diagnostic_malformed_resets_all_fields(self):
+  e=diagnose(prod,b'not CMS')
+  self.assertEqual(bytes(e),b'\0'*C.sizeof(e))
+ def test_diagnostic_time_failure_is_not_signature_failure(self):
+  now=dt.datetime.now(dt.timezone.utc)
+  for validity in [(now-dt.timedelta(days=2),now-dt.timedelta(days=1)),(now+dt.timedelta(days=1),now+dt.timedelta(days=2))]:
+   leaf=cert('Synthetic pinned signer',self.lk,self.issuer,self.ik,validity=validity)
+   data=sign(self.payload,leaf,self.lk,[self.issuer]);e=diagnose(test,data,self.anchor,self.anchor)
+   self.assertEqual((e.chain,e.temporal,e.signature,e.fingerprint_valid),(2,2,0,0))
+ def test_diagnostic_injection_absent_production(self):
+  self.assertFalse(hasattr(prod,'v3_test_cms_diagnose_inner'))
  def test_inner_api_not_exposed_for_injected_roots(self):self.assertFalse(hasattr(prod,'v3_test_inner_authenticate'))
 
 
