@@ -2,9 +2,9 @@
 
 Production source: `DeviceGateway/ProvisioningCMSCore`, called through the actual gateway and Minimuxer Swift wrappers. No caller-controlled roots, dates, verification flags or pin sets. Production does not define `V3_CMS_TESTING`.
 
-`python3 -B TestsCMS/test_cms.py` compiles that exact C source and runs 29 adversarial/synthetic cases. Synthetic roots and pins exist only in a separately compiled test library; production rejects those identities. These optional development tests require Python cryptography; they are not the mandatory native runner and do not authorize installing an additional dependency.
+`python3 -B TestsCMS/test_cms.py` compiles that exact C source and runs 33 adversarial/synthetic cases. Synthetic roots and pins exist only in a separately compiled test library; production rejects those identities. These optional development tests require Python cryptography; they are not the mandatory native runner and do not authorize installing an additional dependency.
 
-Native qualification uses only Python standard library: `python3 -B TestsCMS/run_native.py --openssl-root /absolute/lts-host-build/install --openssl-cli /absolute/lts-host-build/apps/openssl --output /temporary/cms-native.json`. Build that test-only CLI with `make apps/openssl` in the existing verified host OpenSSL 3.5.9 build, without additional acquisition or product embedding. The runner checks exact header and linked-runtime/CLI versions, compiles production and separate test-macro libraries against the existing static archive (lib or lib64), and runs 40 named security checks. Synthetic keys exist only in an automatically removed temporary directory. `--development` is explicitly unqualified.
+Native qualification uses only Python standard library: `python3 -B TestsCMS/run_native.py --openssl-root /absolute/lts-host-build/install --openssl-cli /absolute/lts-host-build/apps/openssl --output /temporary/cms-native.json`. Build that test-only CLI with `make apps/openssl` in the existing verified host OpenSSL 3.5.9 build, without additional acquisition or product embedding. The runner checks exact header and linked-runtime/CLI versions, compiles production and separate test-macro libraries against the existing static archive (lib or lib64), and runs 58 named security checks. Synthetic keys exist only in an automatically removed temporary directory. `--development` is explicitly unqualified.
 
 `verify_profile_cms.c` is a no-logging CLI for public-fixture integration. Arguments: `outer|inner input output`. Outputs must stay in temporary directories excluded from artifacts. Only authenticated bytes are written. SS tests/preservation_der owns hash-pinned public fixture acquisition and full Swift field-binding composition.
 
@@ -46,3 +46,35 @@ suite now has 29 cases; the standard-library native runner has 40 named checks,
 including verified-but-unpinned, tamper, temporal, unsupported algorithm, reset,
 role-observation non-authority, and untrusted-role non-disclosure checks.
 System OpenSSL development passes do not qualify the pinned 3.5.9 build.
+
+## Cryptographic inspection is not authentication
+
+`ProfileCMSVerifier.inspectInnerCryptography` / the distinct C
+`v3_profile_cms_inspect_inner_cryptography` return an explicitly **untrusted**
+content result. They establish only current strict three-certificate Apple Root
+G3 chain validity, bounded approved algorithm/attribute shapes, unique signer
+SID, and CMS signature/content-digest correctness. They do not establish that
+Apple authorized the signer for provisioning profiles, or that the input came
+from Apple. A generic Apple-chain or app-developer certificate is not promoted
+to a provisioning authority by this API. `matchesApprovedSigner` and signer
+SHA256 are observations, not a pin-registration or trust-store mechanism.
+
+The preservation integration must independently obtain an operation-bound,
+non-forgeable exact-full-outer-profile Apple-origin receipt, check its current
+account/team/owner binding, and complete outer-envelope authentication plus all
+outer/inner operative-field bindings before using inspection content as authority.
+The receipt must match the entire immutable outer CMS, not its hash alone, signer,
+inner payload, UUID or team. Inspection results must never be cached, logged,
+serialized, or used as a diagnostic shortcut for a future operation. This API
+accepts no caller root, date, pin, flags, trust callback, or authorization boolean.
+
+`authenticateInner` remains unchanged: unknown full-DER leaf pins are rejected
+with empty authenticated content, even if separate cryptographic inspection
+succeeds. `diagnoseInnerSigner` remains content-free. Inspection allocates its
+separate untrusted content only after all chain and cryptographic checks; every
+failure and explicit free zeroes all result fields. Synthetic injection exists
+only in the separately compiled test library. The test suites now have 33
+unittest cases and 58 exact-inventory native checks, including unknown-pin
+non-authority, wrong roots, tampered signature/content, temporal validity,
+algorithm/attribute, multiple/ambiguous SID, key/input bounds, and empty-output
+regressions. System OpenSSL passes remain development-only, not 3.5.9 qualification.

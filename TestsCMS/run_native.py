@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Standard-library-only actual C qualification with the existing pinned OpenSSL CLI."""
-from diagnostic_support import diagnose
+from diagnostic_support import diagnose, inspect_cryptography
 import hashlib
 import argparse, ctypes as C, datetime as dt, json, os, pathlib, subprocess, tempfile
 P=pathlib.Path
@@ -42,7 +42,7 @@ with tempfile.TemporaryDirectory(prefix='cms-native-') as temp:
  def check(name,ok):
   if not ok:raise AssertionError(name)
   checks.append(name)
- check('production_has_no_injected_trust_exports',not hasattr(libs['production'],'v3_test_cms_authenticate') and not hasattr(libs['production'],'v3_test_inner_authenticate') and not hasattr(libs['production'],'v3_test_cms_diagnose_inner'))
+ check('production_has_no_injected_trust_exports',not hasattr(libs['production'],'v3_test_cms_authenticate') and not hasattr(libs['production'],'v3_test_inner_authenticate') and not hasattr(libs['production'],'v3_test_cms_diagnose_inner') and not hasattr(libs['production'],'v3_test_cms_inspect_inner_cryptography'))
  def verify(data,inner=False,anchor=None,pin=None):
   out=Content();buf=C.create_string_buffer(data);lib=libs['production'] if anchor is None else test
   if anchor is None:status=getattr(lib,'v3_profile_cms_verify_pinned_inner' if inner else 'v3_profile_cms_verify_legacy_outer')(buf,len(data),C.byref(out))
@@ -95,6 +95,19 @@ authorityKeyIdentifier=keyid:always
  check('production_rejects_synthetic_outer',verify(valid)[0]==3)
  check('production_rejects_unknown_inner_pin',verify(valid,True)[0]==6)
  check('test_rejects_wrong_inner_pin',verify(valid,True,anchor,anchor)[0]==6)
+ check('inspection_unknown_pin_untrusted_not_authority',inspect_cryptography(test,valid,anchor,anchor)==(0,payload,0,hashlib.sha256(pin).digest()) and verify(valid,True,anchor,anchor)==(6,None))
+ check('inspection_known_pin_still_distinct_result',inspect_cryptography(test,valid,anchor,pin)==(0,payload,1,hashlib.sha256(pin).digest()))
+ check('inspection_production_rejects_synthetic_root',inspect_cryptography(libs['production'],valid)[0]==3)
+ check('inspection_signature_tamper_empty',inspect_cryptography(test,valid[:-1]+bytes([valid[-1]^1]),anchor,anchor)[0]==4)
+ check('inspection_content_tamper_empty',inspect_cryptography(test,valid.replace(payload,b'X'+payload[1:]),anchor,anchor)[0]==4)
+ check('inspection_trailing_data_empty',inspect_cryptography(test,valid+b'X',anchor,anchor)[0]==1)
+ check('inspection_truncated_data_empty',inspect_cryptography(test,valid[:-1],anchor,anchor)[0]==1)
+ check('inspection_detached_empty',inspect_cryptography(test,sign(),anchor,anchor)[0]==2)
+ check('inspection_attributes_required',inspect_cryptography(test,sign(options=('-nodetach','-noattr')),anchor,anchor)[0]==2)
+ check('inspection_strong_algorithm_required',inspect_cryptography(test,sign(digest='sha224',options=('-nodetach',)),anchor,anchor)[0]==2)
+ check('inspection_sha1_not_authority',inspect_cryptography(test,sign(digest='sha1',options=('-nodetach',)),anchor,anchor)[0]==2)
+ check('inspection_empty_input_empty',inspect_cryptography(libs['production'],b'')[0]==5)
+ check('inspection_oversized_input_empty',inspect_cryptography(libs['production'],b'x'*(1024*1024+1))[0]==5)
  e=diagnose(test,valid,anchor,anchor)
  check('diagnostic_unknown_pin_verified_hash_not_authority',(e.pin,e.chain,e.temporal,e.signature,e.fingerprint_valid)==(2,1,1,1,1) and bytes(e.signer_sha256)==hashlib.sha256(pin).digest() and verify(valid,True,anchor,anchor)==(6,None))
  check('diagnostic_verified_finite_role_observations',not e.profile_subject_marker and not e.profile_issuer_marker and not e.profile_extension_marker and not e.app_developer_marker)
@@ -132,6 +145,7 @@ authorityKeyIdentifier=keyid:always
   req(label,'Apple iPhone OS Provisioning Profile Signing');newpin=issue(label,'issuer',fmt(lo),fmt(hi));cms=sign(label,options=('-nodetach',))
   e=diagnose(test,cms,anchor,anchor)
   check('diagnostic_'+label+'_time_no_hash',(e.chain,e.temporal,e.signature,e.fingerprint_valid)==(2,2,0,0))
+  check('inspection_'+label+'_time_empty',inspect_cryptography(test,cms,anchor,anchor)[0]==7)
   check(label+'_inner_time_rejected',verify(cms,True,anchor,newpin)[0]==7)
   check(label+'_legacy_documented_no_time',verify(cms,anchor=anchor)==(0,payload))
  # Rewrite only bounded synthetic DER to exercise adversarial cert/SID inventory.
@@ -153,6 +167,7 @@ authorityKeyIdentifier=keyid:always
  certs=[n[2] for n in nodes(fields[certindex][1])]
  check('reordered_certificates_same_authority',verify(rewrite_certificates(list(reversed(certs))),True,anchor,pin)==(0,payload))
  check('duplicate_matching_sid_rejected',verify(rewrite_certificates(certs+[pin]),True,anchor,pin)[0]==2)
+ check('inspection_duplicate_sid_empty',inspect_cryptography(test,rewrite_certificates(certs+[pin]),anchor,anchor)[0]==2)
  # Same issuer+serial but a different subject/key, still untrusted ambiguity.
  req('collision','Different synthetic signer');collision=issue('collision','issuer',before,after)
  for index,inventory in enumerate([certs+[collision],[collision]+certs]):
@@ -162,6 +177,7 @@ authorityKeyIdentifier=keyid:always
  check('signed_content_type_tamper_rejected',verify(valid[:at]+oid[:-1]+b'\x03'+valid[at+len(oid):],True,anchor,pin)[0]==4)
  changed=[f[2] for f in fields];signers=nodes(fields[-1][1]);changed[-1]=tlv(49,signers[0][2]*2)
  check('multiple_signers_rejected',verify(tlv(48,parts[0][2]+tlv(160,tlv(48,b''.join(changed)))),True,anchor,pin)[0]==2)
+ check('inspection_multiple_signers_empty',inspect_cryptography(test,tlv(48,parts[0][2]+tlv(160,tlv(48,b''.join(changed)))),anchor,anchor)[0]==2)
  # Enlarge the synthetic RSA modulus without performing expensive key generation.
  # The candidate is rejected before pin/chain math, not interpreted as a signer.
  def oversized_key_der(data):
@@ -179,6 +195,7 @@ authorityKeyIdentifier=keyid:always
   return b''.join(rewritten)
  oversized=oversized_key_der(pin)
  check('oversized_rsa_candidate_rejected_before_math',oversized!=pin and verify(rewrite_certificates([oversized if c==pin else c for c in certs]),True,anchor,pin)[0]==2)
+ check('inspection_oversized_key_empty',inspect_cryptography(test,rewrite_certificates([oversized if c==pin else c for c in certs]),anchor,anchor)[0]==2)
  check('empty_input_rejected',verify(b'')[0]==5)
  check('oversized_input_rejected',verify(b'x'*(1024*1024+1))[0]==5)
 expected=json.loads((P(__file__).resolve().parent/'expected-cases.json').read_text())

@@ -126,11 +126,12 @@ done: X509_STORE_CTX_free(ctx); return ok;
 }
 static v3_cms_status authenticate(const uint8_t *data,size_t length,
  const uint8_t *test_root,size_t test_root_length, cms_role role,
- const uint8_t *test_pin,size_t test_pin_length,v3_cms_content *result, v3_cms_signer_evidence *evidence) {
+ const uint8_t *test_pin,size_t test_pin_length,v3_cms_content *result, v3_cms_signer_evidence *evidence, v3_cms_cryptographic_inspection *inspection) {
  v3_cms_status status=V3_CMS_MALFORMED;
  CMS_ContentInfo *cms=NULL; STACK_OF(X509) *certs=NULL,*only_signer=NULL;
  X509_STORE *store=NULL; BIO *verified=NULL;
  if(evidence) memset(evidence,0,sizeof(*evidence));
+ if(inspection) memset(inspection,0,sizeof(*inspection));
  if(!result) return V3_CMS_MALFORMED;
  result->bytes=NULL; result->length=0;
  if(!data || !length || length>MAX_CMS_BYTES || length>LONG_MAX) return V3_CMS_RESOURCE;
@@ -167,7 +168,7 @@ static v3_cms_status authenticate(const uint8_t *data,size_t length,
  if(!algorithms_ok) { status=V3_CMS_UNSUPPORTED; goto done; }
  int pin_ok=role!=PINNED_INNER || approved_inner(signer,test_pin,test_pin_length);
  if(evidence) evidence->pin=pin_ok ? V3_CMS_PASSED : V3_CMS_FAILED;
- if(!pin_ok && !evidence) { status=V3_CMS_UNSUPPORTED_SIGNER; goto done; }
+ if(!pin_ok && !evidence && !inspection) { status=V3_CMS_UNSUPPORTED_SIGNER; goto done; }
  store=X509_STORE_new(); if(!store) { status=V3_CMS_RESOURCE; goto done; }
  int roots_ok=0;
 #ifdef V3_CMS_TESTING
@@ -213,19 +214,33 @@ static v3_cms_status authenticate(const uint8_t *data,size_t length,
  }
  char *bytes=NULL; long n=BIO_get_mem_data(verified,&bytes);
  if(n<=0 || (size_t)n>MAX_CONTENT_BYTES) { status=V3_CMS_RESOURCE; goto done; }
+ if(inspection) {
+  /* Strong chain/math alone does NOT establish a provisioning-signing role.
+     Return a distinct untrusted-content type, never an authenticated result. */
+  unsigned int digest_length=0;
+  if(X509_digest(signer,EVP_sha256(),inspection->signer_sha256,&digest_length)!=1 || digest_length!=32) {
+   status=V3_CMS_RESOURCE; goto done;
+  }
+  inspection->untrusted_bytes=malloc((size_t)n);
+  if(!inspection->untrusted_bytes) { status=V3_CMS_RESOURCE; goto done; }
+  memcpy(inspection->untrusted_bytes,bytes,(size_t)n);
+  inspection->length=(size_t)n; inspection->matches_approved_signer=(uint8_t)pin_ok;
+  status=V3_CMS_OK; goto done;
+ }
  result->bytes=malloc((size_t)n); if(!result->bytes) { status=V3_CMS_RESOURCE; goto done; }
  memcpy(result->bytes,bytes,(size_t)n); result->length=(size_t)n; status=V3_CMS_OK;
 done:
+ if(inspection && status!=V3_CMS_OK) v3_profile_cms_inspection_free(inspection);
  BIO_free(verified); sk_X509_free(only_signer); X509_STORE_free(store);
  sk_X509_pop_free(certs,X509_free); CMS_ContentInfo_free(cms);
  /* Error codes stay finite; callers never receive OpenSSL/provider/profile text. */
  return status;
 }
 v3_cms_status v3_profile_cms_verify_legacy_outer(const uint8_t *data,size_t n,v3_cms_content *out) {
- return authenticate(data,n,NULL,0,LEGACY_OUTER,NULL,0,out,NULL);
+ return authenticate(data,n,NULL,0,LEGACY_OUTER,NULL,0,out,NULL,NULL);
 }
 v3_cms_status v3_profile_cms_verify_pinned_inner(const uint8_t *data,size_t n,v3_cms_content *out) {
- return authenticate(data,n,NULL,0,PINNED_INNER,NULL,0,out,NULL);
+ return authenticate(data,n,NULL,0,PINNED_INNER,NULL,0,out,NULL,NULL);
 }
 void v3_profile_cms_content_free(v3_cms_content *result) {
  if(result) { free(result->bytes); result->bytes=NULL; result->length=0; }
@@ -233,21 +248,21 @@ void v3_profile_cms_content_free(v3_cms_content *result) {
 #ifdef V3_CMS_TESTING
 v3_cms_status v3_test_cms_authenticate(const uint8_t *data,size_t n,const uint8_t *root,size_t root_n,v3_cms_content *out) {
  if(!root) { if(out){out->bytes=NULL;out->length=0;} return V3_CMS_UNTRUSTED; }
- return authenticate(data,n,root,root_n,LEGACY_OUTER,NULL,0,out,NULL);
+ return authenticate(data,n,root,root_n,LEGACY_OUTER,NULL,0,out,NULL,NULL);
 }
 #endif
 
 #ifdef V3_CMS_TESTING
 v3_cms_status v3_test_inner_authenticate(const uint8_t *data,size_t n,const uint8_t *root,size_t root_n,const uint8_t *pin,size_t pin_n,v3_cms_content *out) {
  if(!root || !pin || !pin_n || pin_n>MAX_CERT_BYTES) { if(out){out->bytes=NULL;out->length=0;} return V3_CMS_UNTRUSTED; }
- return authenticate(data,n,root,root_n,PINNED_INNER,pin,pin_n,out,NULL);
+ return authenticate(data,n,root,root_n,PINNED_INNER,pin,pin_n,out,NULL,NULL);
 }
 #endif
 
 void v3_profile_cms_diagnose_inner(const uint8_t *data,size_t n,v3_cms_signer_evidence *evidence) {
  if(!evidence) return;
  v3_cms_content out={NULL,0};
- (void)authenticate(data,n,NULL,0,PINNED_INNER,NULL,0,&out,evidence);
+ (void)authenticate(data,n,NULL,0,PINNED_INNER,NULL,0,&out,evidence,NULL);
  v3_profile_cms_content_free(&out);
 }
 #ifdef V3_CMS_TESTING
@@ -257,7 +272,33 @@ void v3_test_cms_diagnose_inner(const uint8_t *data,size_t n,const uint8_t *root
  memset(evidence,0,sizeof(*evidence));
  if(!root || !pin || !pin_n || pin_n>MAX_CERT_BYTES) return;
  v3_cms_content out={NULL,0};
- (void)authenticate(data,n,root,root_n,PINNED_INNER,pin,pin_n,&out,evidence);
+ (void)authenticate(data,n,root,root_n,PINNED_INNER,pin,pin_n,&out,evidence,NULL);
  v3_profile_cms_content_free(&out);
+}
+#endif
+
+/* This API does not authenticate an Apple profile, even on V3_CMS_OK. */
+v3_cms_status v3_profile_cms_inspect_inner_cryptography(const uint8_t *data,size_t n,
+ v3_cms_cryptographic_inspection *inspection) {
+ if(!inspection) return V3_CMS_MALFORMED;
+ v3_cms_content authenticated={NULL,0};
+ v3_cms_status status=authenticate(data,n,NULL,0,PINNED_INNER,NULL,0,&authenticated,NULL,inspection);
+ v3_profile_cms_content_free(&authenticated);
+ return status;
+}
+void v3_profile_cms_inspection_free(v3_cms_cryptographic_inspection *inspection) {
+ if(inspection) { free(inspection->untrusted_bytes); memset(inspection,0,sizeof(*inspection)); }
+}
+#ifdef V3_CMS_TESTING
+v3_cms_status v3_test_cms_inspect_inner_cryptography(const uint8_t *data,size_t n,
+ const uint8_t *root,size_t root_n,const uint8_t *pin,size_t pin_n,
+ v3_cms_cryptographic_inspection *inspection) {
+ if(!inspection) return V3_CMS_MALFORMED;
+ memset(inspection,0,sizeof(*inspection));
+ if(!root || !pin || !pin_n || pin_n>MAX_CERT_BYTES) return V3_CMS_UNTRUSTED;
+ v3_cms_content authenticated={NULL,0};
+ v3_cms_status status=authenticate(data,n,root,root_n,PINNED_INNER,pin,pin_n,&authenticated,NULL,inspection);
+ v3_profile_cms_content_free(&authenticated);
+ return status;
 }
 #endif

@@ -1,4 +1,4 @@
-from diagnostic_support import diagnose
+from diagnostic_support import diagnose, inspect_cryptography
 from pathlib import Path
 import ctypes as C, datetime as dt, hashlib, json, unittest, sys, os, subprocess, tempfile
 from cryptography import x509
@@ -157,6 +157,25 @@ class PinnedInner(unittest.TestCase):
    self.assertEqual((e.chain,e.temporal,e.signature,e.fingerprint_valid),(2,2,0,0))
  def test_diagnostic_injection_absent_production(self):
   self.assertFalse(hasattr(prod,'v3_test_cms_diagnose_inner'))
+ def test_inspection_untrusted_result_is_not_authentication(self):
+  for pin,expected_pin in [(self.pin,1),(self.anchor,0)]:
+   result=inspect_cryptography(test,self.cms,self.anchor,pin)
+   self.assertEqual(result,(0,self.payload,expected_pin,hashlib.sha256(self.pin).digest()))
+  self.assertEqual(verify(self.cms,self.anchor,True,self.anchor),(6,None))
+ def test_inspection_strict_failures_zero_output(self):
+  for data,expected in [(b'',5),(b'bad',1),(self.cms+b'x',1),(self.cms[:-1],1),
+   (self.cms[:-1]+bytes([self.cms[-1]^1]),4),(self.cms.replace(self.payload,b'X'+self.payload[1:]),4),
+   (sign(self.payload,self.leaf,self.lk,[self.issuer],digest=hashes.SHA224()),2),
+   (sign(self.payload,self.leaf,self.lk,[self.issuer],options=[pkcs7.PKCS7Options.Binary,pkcs7.PKCS7Options.NoAttributes]),2)]:
+   self.assertEqual(inspect_cryptography(test,data,self.anchor,self.anchor)[0],expected)
+  self.assertEqual(inspect_cryptography(prod,self.cms)[0],3)
+ def test_inspection_current_time_required(self):
+  now=dt.datetime.now(dt.timezone.utc)
+  for validity in [(now-dt.timedelta(days=2),now-dt.timedelta(days=1)),(now+dt.timedelta(days=1),now+dt.timedelta(days=2))]:
+   leaf=cert('Synthetic pinned signer',self.lk,self.issuer,self.ik,validity=validity)
+   self.assertEqual(inspect_cryptography(test,sign(self.payload,leaf,self.lk,[self.issuer]),self.anchor,self.anchor)[0],7)
+ def test_inspection_test_injection_absent_production(self):
+  self.assertFalse(hasattr(prod,'v3_test_cms_inspect_inner_cryptography'))
  def test_inner_api_not_exposed_for_injected_roots(self):self.assertFalse(hasattr(prod,'v3_test_inner_authenticate'))
 
 

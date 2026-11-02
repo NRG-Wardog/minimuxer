@@ -47,7 +47,48 @@ public struct GatewayProfileCMSSignerEvidence {
     }
 }
 
+/// Cryptographic checks only, NOT a provisioning authority or authenticated profile.
+/// Never promote these bytes without independent, operation-bound provenance of
+/// the exact full outer profile and complete outer/inner operative-field binding.
+public struct GatewayProfileCMSCryptographicInspection {
+    public let untrustedContent: Data
+    public let signerSHA256: String
+    public let matchesApprovedSigner: Bool
+    fileprivate init(content: Data, signerSHA256: String, matchesApprovedSigner: Bool) {
+        self.untrustedContent = content
+        self.signerSHA256 = signerSHA256
+        self.matchesApprovedSigner = matchesApprovedSigner
+    }
+}
+
 public enum GatewayProfileCMSVerifier {
+    /// Requires strict current G3 chain, strong algorithm, unique SID and CMS math.
+    /// Does NOT establish profile-signing role or Apple-origin provenance.
+    public static func inspectInnerCryptography(_ data: Data) throws -> GatewayProfileCMSCryptographicInspection {
+        var output = v3_cms_cryptographic_inspection()
+        defer { v3_profile_cms_inspection_free(&output) }
+        let status = data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+            v3_profile_cms_inspect_inner_cryptography(bytes.bindMemory(to: UInt8.self).baseAddress,
+                                                     bytes.count, &output)
+        }
+        switch status {
+        case V3_CMS_OK:
+            guard let bytes = output.untrusted_bytes, output.length > 0 else {
+                throw GatewayProfileCMSVerificationError.verificationFailed
+            }
+            var digest = output.signer_sha256
+            let sha256 = withUnsafeBytes(of: &digest) { $0.map { String(format: "%02x", $0) }.joined() }
+            return GatewayProfileCMSCryptographicInspection(content: Data(bytes: bytes, count: output.length),
+                signerSHA256: sha256, matchesApprovedSigner: output.matches_approved_signer == 1)
+        case V3_CMS_SIGNER_TIME_INVALID:
+            throw GatewayProfileCMSVerificationError.signerTimeInvalid
+        case V3_CMS_MALFORMED, V3_CMS_UNSUPPORTED, V3_CMS_RESOURCE:
+            throw GatewayProfileCMSVerificationError.unsupportedRepresentation
+        default:
+            throw GatewayProfileCMSVerificationError.verificationFailed
+        }
+    }
+
     /// Diagnostic-only. Returns no profile content and cannot authorize renewal.
     public static func diagnoseInnerSigner(_ data: Data) -> GatewayProfileCMSSignerEvidence {
         var evidence = v3_cms_signer_evidence()
